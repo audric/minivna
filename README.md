@@ -4,6 +4,12 @@ A desktop program for the original **mRS miniVNA** antenna analyser (0.1–180 M
 FTDI serial chip). It is a rewrite by IW1GEU (Audric) of IG_miniVNA by F4CLB (Jean-Louis), whose source was lost; the
 measurement methods and numbers follow that program. The miniVNA Pro is not supported.
 
+<img src="images/miniVNA.jpg" alt="The mRS miniVNA: DUT and DET connectors on the left, USB on the right" width="420">
+
+![The main window: SWR and return loss of an antenna, marker 1 read-outs](images/screenshot.png)
+
+*The main window, here with the built-in simulated device (`minivna --sim`).*
+
 What it does: SWR, |Z|, return loss, phase, Rs and |Xs| curves with two markers, a Smith
 chart view of the same sweep, bandwidth
 and Q, cable loss, cable length (with an automatic search), transmission loss, a signal
@@ -76,6 +82,8 @@ Needs a Rust toolchain (rustup.rs). On Debian/Ubuntu also:
 - `docs/hardware-checks.md` — what was measured on a real device
 
 ## A second instrument: the 35-4400 MHz sweeper
+
+<img src="images/35-4400mhz.jpg" alt="The 35-4400 MHz box: IN and OUT connectors on the left, USB on the right" width="420">
 
 The program can also drive the small "35-4400 MHz spectrum analyzer / sweep source"
 boxes that speak the NWT protocol (tested with one unit, firmware byte 119). Choose it

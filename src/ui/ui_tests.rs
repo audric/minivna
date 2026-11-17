@@ -128,6 +128,67 @@ fn range_boxes_are_wide_enough_for_a_zoomed_frequency() {
     }
 }
 
+/// The lowest widget of the side panel that takes the keyboard focus: the offset field.
+fn offset_field(h: &mut Harness, s: &mut AppState) -> egui::Rect {
+    let mut actions = Vec::new();
+    let mut lowest: Option<egui::Rect> = None;
+    for _ in 0..60 {
+        h.frame(vec![key(Key::Tab, Modifiers::NONE)], Modifiers::NONE, |ui| side_panel::show(ui, s, &mut actions));
+        if let Some(rect) = h.focused_rect() {
+            if lowest.is_none_or(|l| rect.top() > l.top()) {
+                lowest = Some(rect);
+            }
+        }
+    }
+    lowest.expect("nothing takes the focus")
+}
+
+fn loss_curve(s: &AppState) -> Vec<[f32; 2]> {
+    use super::plot::{build, Prim};
+    let colors = s.settings.screen.clone();
+    build(s, &colors, 800.0, 500.0)
+        .into_iter()
+        .find_map(|p| match p {
+            Prim::Line { points, color, dashed: false, .. } if color == colors.rl && points.len() > 2 => Some(points),
+            _ => None,
+        })
+        .expect("no loss curve")
+}
+
+#[test]
+fn the_loss_offset_moves_the_curve_when_typed_or_dragged() {
+    let (mut h, mut s, mut actions) = (Harness::new(), swept(), Vec::new());
+    let before = loss_curve(&s);
+    let field = offset_field(&mut h, &mut s);
+
+    // Typed: click the field, type, Enter.
+    h.click(field.center(), |ui| side_panel::show(ui, &mut s, &mut actions));
+    let typed = vec![key(Key::A, CTRL), Event::Text("10".into())];
+    h.frame(typed, Modifiers::NONE, |ui| side_panel::show(ui, &mut s, &mut actions));
+    h.frame(vec![key(Key::Enter, Modifiers::NONE)], Modifiers::NONE, |ui| side_panel::show(ui, &mut s, &mut actions));
+    h.frame(vec![], Modifiers::NONE, |ui| side_panel::show(ui, &mut s, &mut actions));
+    assert_eq!(s.rl_offset_db, 10.0, "typing 10 in the offset field");
+    let after = loss_curve(&s);
+    let moved = before.iter().zip(&after).filter(|(a, b)| (a[1] - b[1]).abs() > 1.0).count();
+    assert!(moved > before.len() / 2, "only {moved} of {} points moved", before.len());
+
+    // Dragged to the right: the value goes up.
+    let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    let (from, to) = (field.center(), field.center() + egui::vec2(40.0, 0.0));
+    let mut draw = |h: &mut Harness, events: Vec<Event>, s: &mut AppState| {
+        let mut actions = Vec::new();
+        h.frame(events, Modifiers::NONE, |ui| side_panel::show(ui, s, &mut actions));
+    };
+    draw(&mut h, vec![key(Key::Escape, Modifiers::NONE)], &mut s);
+    draw(&mut h, vec![Event::PointerMoved(from)], &mut s);
+    draw(&mut h, vec![button(from, true)], &mut s);
+    for step in 1..=8 {
+        draw(&mut h, vec![Event::PointerMoved(from + egui::vec2(5.0 * step as f32, 0.0))], &mut s);
+    }
+    draw(&mut h, vec![button(to, false)], &mut s);
+    assert!(s.rl_offset_db > 10.0, "dragging right left the offset at {}", s.rl_offset_db);
+}
+
 fn bands(h: &mut Harness, d: &mut BandsDialog, s: &mut AppState) -> Vec<egui::Rect> {
     d.open = true;
     for _ in 0..4 {
