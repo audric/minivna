@@ -221,10 +221,13 @@ impl AppState {
         (self.m1, self.m2) = (None, None);
         self.auto_pass = 0;
         self.band_markers_pending = false;
-        if !self.mode_available(self.mode) {
-            self.mode = UiMode::Transmission;
-            self.settings.last_mode = self.mode.key().to_string();
-        }
+        // The sweeper has one measuring mode. The miniVNA comes back in the mode it was
+        // last used in (`last_mode` is only written for the miniVNA): left in Transmission
+        // with nothing on its DET input it would draw noise.
+        self.mode = match kind {
+            DeviceKind::Nwt => UiMode::Transmission,
+            DeviceKind::MiniVna => UiMode::from_key(&self.settings.last_mode),
+        };
         if !self.smith_available() {
             self.view = View::Graph;
         }
@@ -612,7 +615,9 @@ impl AppState {
             return false;
         }
         self.mode = mode;
-        self.settings.last_mode = mode.key().to_string();
+        if self.settings.device == DeviceKind::MiniVna {
+            self.settings.last_mode = mode.key().to_string();
+        }
         if let Some(last) = self.points().len().checked_sub(1) {
             self.m1 = Some((last as f64 / 3.0).round() as usize);
             self.m2 = Some((last as f64 * 0.66).round() as usize);
@@ -1710,7 +1715,33 @@ pub(crate) mod tests {
             // Back to the miniVNA: a range it cannot make is replaced by its full range.
             assert!(s.set_device(DeviceKind::MiniVna));
             assert_eq!((s.start_hz, s.stop_hz), (1_000_000, 180_000_000));
+        }
+
+        #[test]
+        fn going_back_to_the_minivna_restores_its_mode() {
+            // Seen on hardware: left in Transmission after the sweeper, a miniVNA with
+            // nothing on its DET input draws noise spikes.
+            let mut s = state();
+            assert_eq!(s.mode, UiMode::Antenna);
+            assert!(s.set_device(DeviceKind::Nwt));
             assert_eq!(s.mode, UiMode::Transmission);
+            assert!(s.set_mode(UiMode::Generator) && s.set_mode(UiMode::Transmission));
+            assert!(s.set_device(DeviceKind::MiniVna));
+            assert_eq!(s.mode, UiMode::Antenna);
+
+            // A mode chosen on the miniVNA is the one it comes back to.
+            assert!(s.set_mode(UiMode::CableLoss));
+            assert!(s.set_device(DeviceKind::Nwt) && s.set_device(DeviceKind::MiniVna));
+            assert_eq!(s.mode, UiMode::CableLoss);
+            assert!(s.set_mode(UiMode::Transmission));
+            assert!(s.set_device(DeviceKind::Nwt) && s.set_device(DeviceKind::MiniVna));
+            assert_eq!(s.mode, UiMode::Transmission);
+
+            // Started with the sweeper saved and no mode ever chosen on a miniVNA.
+            let settings = Settings { device: DeviceKind::Nwt, ..Settings::default() };
+            let mut s = AppState::new(settings, Calibration::default());
+            assert!(s.set_device(DeviceKind::MiniVna));
+            assert_eq!(s.mode, UiMode::Antenna);
         }
 
         #[test]
