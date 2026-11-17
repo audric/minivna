@@ -25,5 +25,6 @@ RUN
 chmod +x "$appdir/AppRun"
 
 mkdir -p dist
-ARCH=$arch appimagetool "$appdir" "dist/minivna-$version-$arch.AppImage"
+# No AppStream description yet: it has to name the program's licence, which is not chosen.
+ARCH=$arch appimagetool --no-appstream "$appdir" "dist/minivna-$version-$arch.AppImage"
 echo "dist/minivna-$version-$arch.AppImage"

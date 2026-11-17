@@ -13,7 +13,7 @@ jobs:
     # An older system on purpose: the binary then also starts on older distributions.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
       - run: cargo test
       - name: Get appimagetool
@@ -32,7 +32,7 @@ jobs:
           mkdir "$dir"
           cp target/release/minivna packaging/minivna.desktop packaging/minivna.png README.md "$dir/"
           tar czf "dist/$dir.tar.gz" "$dir"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: minivna-linux-x86_64
           path: dist/*
@@ -41,7 +41,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cargo test
       - run: cargo build --release
       - name: Zip the program with the README
@@ -50,7 +50,7 @@ jobs:
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Path target/release/minivna.exe, README.md -DestinationPath "dist/minivna-$version-windows-x86_64.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: minivna-windows-x86_64
           path: dist/*
@@ -60,7 +60,7 @@ jobs:
     # Apple silicon. Unsigned: on first start, right-click the program and choose Open.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cargo test
       - run: cargo build --release
       - name: Wrap in an unsigned .app inside a .dmg
@@ -82,7 +82,7 @@ jobs:
           </dict></plist>
           PLIST
           hdiutil create -volname minivna -srcfolder bundle -ov -format UDZO "dist/minivna-$version-macos-arm64.dmg"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: minivna-macos-arm64
           path: dist/*
@@ -96,7 +96,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: packages
           merge-multiple: true
