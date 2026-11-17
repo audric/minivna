@@ -1,0 +1,141 @@
+//! The read-outs above the graph: marker rows, inductance/capacitance, bandwidth and Q.
+
+use eframe::egui;
+
+use super::state::{parse_mhz, AppState, Marker};
+use super::text::t;
+use super::{color32, Action};
+
+const FIELD_WIDTH: f32 = 72.0;
+
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, _actions: &mut Vec<Action>) {
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        rows(ui, state);
+        ui.separator();
+        between_markers(ui, state);
+    });
+    ui.add_space(2.0);
+}
+
+fn value(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let label = egui::Label::new(egui::RichText::new(text).monospace()).sense(egui::Sense::click());
+    ui.add_sized([FIELD_WIDTH, 18.0], label)
+}
+
+fn swatch(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, color);
+}
+
+fn rows(ui: &mut egui::Ui, state: &mut AppState) {
+    let colors = state.settings.screen.clone();
+    let reactance = state.reactance_fields();
+    egui::Grid::new("marker rows").num_columns(12).spacing([6.0, 2.0]).show(ui, |ui| {
+        let xs_header = match &reactance {
+            Some((true, ..)) => "| Xs | +j",
+            Some((false, ..)) => "| Xs | -j",
+            None => "| Xs |",
+        };
+        let last_header = match &reactance {
+            Some((true, ..)) => "XL \u{b5}H",
+            Some((false, ..)) => "Xc pF",
+            None => "---",
+        };
+        for header in ["", "", "", "Frequency", "SWR", "| Z |", "R.L.", "Phase", "Rs", xs_header, last_header] {
+            ui.label(t_dynamic(header));
+        }
+        ui.end_row();
+
+        for (marker, name, color) in [(Marker::M1, "Marker 1", colors.m1), (Marker::M2, "Marker 2", colors.m2)] {
+            let index = match marker {
+                Marker::M1 => state.m1,
+                Marker::M2 => state.m2,
+            };
+            let mut on = index.is_some();
+            if ui.checkbox(&mut on, t_dynamic(name)).changed() {
+                state.toggle_marker(marker);
+            }
+            swatch(ui, color32(color));
+            ui.horizontal(|ui| {
+                if ui.small_button("-").clicked() {
+                    state.step_marker(marker, -1);
+                }
+                if ui.small_button("+").clicked() {
+                    state.step_marker(marker, 1);
+                }
+            });
+            let row = index.map(|i| state.marker_row(i)).unwrap_or_default();
+            if value(ui, &row[0]).on_hover_text(t("Double-click to type the frequency")).double_clicked() && index.is_some() {
+                state.entry = Some((marker, row[0].clone()));
+            }
+            for text in &row[1..] {
+                value(ui, text);
+            }
+            let extra = reactance.as_ref().map(|(_, a, b)| if marker == Marker::M1 { a.as_str() } else { b.as_str() });
+            value(ui, extra.unwrap_or(""));
+            ui.end_row();
+        }
+
+        ui.checkbox(&mut state.show_swr_min, t("SWR Mini."));
+        swatch(ui, color32(colors.swr_min));
+        ui.label("");
+        let row = if state.show_swr_min { state.swr_min().map(|i| state.marker_row(i)) } else { None }.unwrap_or_default();
+        for text in &row {
+            value(ui, text);
+        }
+        ui.end_row();
+    });
+}
+
+fn between_markers(ui: &mut egui::Ui, state: &AppState) {
+    let (bw, q) = state.bandwidth_fields().unwrap_or_default();
+    ui.vertical(|ui| {
+        ui.label(t("Marker 1 to 2"));
+        egui::Grid::new("between").num_columns(3).show(ui, |ui| {
+            ui.label(t("Band Width"));
+            value(ui, &bw);
+            ui.label("Hz");
+            ui.end_row();
+            ui.label("Q");
+            value(ui, &q);
+            ui.end_row();
+        });
+    });
+}
+
+/// Like `t`, for texts chosen at run time from a fixed set.
+fn t_dynamic(text: &str) -> String {
+    text.to_string()
+}
+
+/// The small window for typing a marker's frequency.
+pub fn entry_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some((marker, mut text)) = state.entry.take() else { return };
+    let mut keep = true;
+    let mut apply = false;
+    egui::Window::new(t("Frequency in MHz"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            let edit = ui.text_edit_singleline(&mut text);
+            edit.request_focus();
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                if ui.button(t("Ok")).clicked() || enter {
+                    apply = true;
+                }
+                if ui.button(t("Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    keep = false;
+                }
+            });
+        });
+    if apply {
+        if let Some(mhz) = parse_mhz(&text) {
+            state.place_marker(marker, mhz * 1e6);
+        }
+    } else if keep {
+        state.entry = Some((marker, text));
+    }
+}

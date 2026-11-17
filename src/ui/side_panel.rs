@@ -55,6 +55,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
         state.commit_range();
     }
     ui.small(state.step_text());
+    ui.add_enabled_ui(!state.busy, |ui| {
+        let both = state.m1.is_some() && state.m2.is_some() && state.m1 != state.m2;
+        if ui.add_enabled(both, egui::Button::new(t("Zoom M1/M2"))).clicked() {
+            actions.push(Action::Zoom);
+        }
+        if ui.add_enabled(!state.zoom_stack.is_empty(), egui::Button::new(t("unZoom"))).clicked() {
+            actions.push(Action::Unzoom);
+        }
+    });
 
     ui.separator();
     ui.label(t("Graphic :"));

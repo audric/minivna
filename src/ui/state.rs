@@ -2,6 +2,8 @@
 //! The drawing modules only read this state and call these methods.
 
 use crate::cal::Calibration;
+use crate::calc::tools::{bandwidth_q, swr_min_index};
+use crate::calc::Point;
 use crate::device::{Mode, SweepRequest, F_MAX_HZ, F_MIN_HZ};
 use crate::store::Settings;
 use crate::sweep::{Event, SweepResult};
@@ -81,6 +83,10 @@ pub struct AppState {
     pub memo_y: Option<f64>,
     /// Ranges to go back to with "unZoom".
     pub zoom_stack: Vec<(u64, u64)>,
+    /// The band preset last chosen, if the range still comes from it.
+    pub current_band: Option<usize>,
+    /// The marker whose frequency is being typed, and the text so far.
+    pub entry: Option<(Marker, String)>,
 }
 
 impl AppState {
@@ -112,6 +118,8 @@ impl AppState {
             show_swr_min: false,
             memo_y: None,
             zoom_stack: Vec::new(),
+            current_band: None,
+            entry: None,
         }
     }
 
@@ -196,6 +204,9 @@ impl AppState {
             }
             Event::Progress(fraction) => self.progress = fraction,
             Event::Sweep(result) => {
+                let last = result.points.len().saturating_sub(1);
+                self.m1 = self.m1.map(|m| m.min(last));
+                self.m2 = self.m2.map(|m| m.min(last));
                 self.result = Some(result);
                 self.status.clear();
             }
@@ -210,6 +221,154 @@ impl AppState {
 
     pub fn step_text(&self) -> String {
         format!("(Step : {} Hz)", self.request().step_hz())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Marker {
+    M1,
+    M2,
+}
+
+/// A value as the read-out fields show it: two decimals, never "NaN" or a huge number.
+pub fn field(value: f64) -> String {
+    if value.is_nan() {
+        String::new()
+    } else if value.is_infinite() {
+        "\u{221e}".to_string()
+    } else if value.abs() > 9999.0 {
+        if value > 0.0 { ">9999" } else { "<-9999" }.to_string()
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+impl AppState {
+    fn points(&self) -> &[Point] {
+        self.result.as_ref().map_or(&[], |r| &r.points)
+    }
+
+    fn marker_mut(&mut self, m: Marker) -> &mut Option<usize> {
+        match m {
+            Marker::M1 => &mut self.m1,
+            Marker::M2 => &mut self.m2,
+        }
+    }
+
+    /// The point nearest to a frequency. `None` without a sweep.
+    pub fn index_at(&self, freq_hz: f64) -> Option<usize> {
+        let points = self.points();
+        let (first, last) = (points.first()?, points.last()?);
+        if points.len() < 2 {
+            return Some(0);
+        }
+        let step = (last.freq_hz - first.freq_hz) / (points.len() - 1) as f64;
+        let index = ((freq_hz - first.freq_hz) / step).round();
+        Some(index.clamp(0.0, (points.len() - 1) as f64) as usize)
+    }
+
+    pub fn place_marker(&mut self, m: Marker, freq_hz: f64) {
+        if let Some(index) = self.index_at(freq_hz) {
+            *self.marker_mut(m) = Some(index);
+        }
+    }
+
+    /// Move a marker by a number of points, staying on the sweep.
+    pub fn step_marker(&mut self, m: Marker, delta: i32) {
+        let Some(last) = self.points().len().checked_sub(1) else { return };
+        if let Some(index) = self.marker_mut(m) {
+            *index = (*index as i64 + delta as i64).clamp(0, last as i64) as usize;
+        }
+    }
+
+    /// Switch a marker on (M1 at one third of the sweep, M2 at two thirds) or off.
+    pub fn toggle_marker(&mut self, m: Marker) {
+        let Some(last) = self.points().len().checked_sub(1) else { return };
+        let home = match m {
+            Marker::M1 => (last as f64 / 3.0).round() as usize,
+            Marker::M2 => (last as f64 * 0.66).round() as usize,
+        };
+        let slot = self.marker_mut(m);
+        *slot = if slot.is_some() { None } else { Some(home) };
+    }
+
+    /// Put a marker on the default frequency of the current band preset.
+    pub fn marker_to_band_default(&mut self, m: Marker) {
+        let Some(band) = self.current_band.and_then(|i| self.settings.bands.get(i)) else { return };
+        let mhz = match m {
+            Marker::M1 => band.m1_mhz,
+            Marker::M2 => band.m2_mhz,
+        };
+        self.place_marker(m, mhz * 1e6);
+    }
+
+    /// Make the two markers the new sweep range. The old range can be restored with `unzoom`.
+    pub fn zoom_to_markers(&mut self) -> bool {
+        let (Some(a), Some(b)) = (self.m1, self.m2) else { return false };
+        let points = self.points();
+        let (Some(pa), Some(pb)) = (points.get(a), points.get(b)) else { return false };
+        let (low, high) = (pa.freq_hz.min(pb.freq_hz) as u64, pa.freq_hz.max(pb.freq_hz) as u64);
+        let before = (self.start_hz, self.stop_hz);
+        if !self.set_range(low, high) {
+            return false;
+        }
+        self.zoom_stack.push(before);
+        self.current_band = None;
+        true
+    }
+
+    pub fn unzoom(&mut self) -> bool {
+        match self.zoom_stack.pop() {
+            Some((start, stop)) => self.set_range(start, stop),
+            None => false,
+        }
+    }
+
+    /// Show the memo line at this height (0 bottom, 1 top), or remove it if it is shown.
+    pub fn toggle_memo(&mut self, y: f64) {
+        self.memo_y = if self.memo_y.is_some() { None } else { Some(y) };
+    }
+
+    /// Frequency in MHz, SWR, |Z|, loss, phase, Rs and Xs at a point, as text.
+    pub fn marker_row(&self, idx: usize) -> [String; 7] {
+        match self.points().get(idx) {
+            Some(p) => [
+                format!("{:.6}", p.freq_hz / 1e6),
+                field(p.swr),
+                field(p.z_mag),
+                field(p.rl_db),
+                field(p.phase_deg),
+                field(p.rs),
+                field(p.xs),
+            ],
+            None => Default::default(),
+        }
+    }
+
+    /// With both markers set: whether the load looks inductive, and the inductance in µH
+    /// (or the capacitance in pF) at M1 and M2.
+    pub fn reactance_fields(&self) -> Option<(bool, String, String)> {
+        let points = self.points();
+        let (a, b) = (points.get(self.m1?)?, points.get(self.m2?)?);
+        let inductive = a.c_pf > b.c_pf;
+        Some(if inductive {
+            (true, field(a.l_uh), field(b.l_uh))
+        } else {
+            (false, field(a.c_pf), field(b.c_pf))
+        })
+    }
+
+    /// With both markers set on different points: bandwidth in Hz and Q.
+    pub fn bandwidth_fields(&self) -> Option<(String, String)> {
+        let points = self.points();
+        let (a, b) = (points.get(self.m1?)?, points.get(self.m2?)?);
+        let (bw, q) = bandwidth_q(a.freq_hz, b.freq_hz)?;
+        Some((format!("{bw:.0}"), field(q)))
+    }
+
+    /// The point with the lowest SWR.
+    pub fn swr_min(&self) -> Option<usize> {
+        swr_min_index(self.points())
     }
 }
 
@@ -356,5 +515,132 @@ pub(crate) mod tests {
     #[test]
     fn step_text() {
         assert_eq!(state().step_text(), "(Step : 358000 Hz)");
+    }
+
+    // ---- markers (Task 10) ----
+
+    /// A state holding a 1-30 MHz sweep of 290 samples: points are 100 kHz apart.
+    pub fn swept() -> AppState {
+        let mut s = state();
+        s.set_range(1_000_000, 30_000_000);
+        s.samples = 290;
+        s.on_event(Event::Sweep(fake_result(1_000_000, 30_000_000, 290)));
+        s
+    }
+
+    #[test]
+    fn place_and_step() {
+        let mut s = swept();
+        s.place_marker(Marker::M1, 14.12e6);
+        assert_eq!(s.m1, Some(131));
+        s.step_marker(Marker::M1, 1);
+        assert_eq!(s.m1, Some(132));
+        s.step_marker(Marker::M1, -500);
+        assert_eq!(s.m1, Some(0));
+        s.step_marker(Marker::M1, 5000);
+        assert_eq!(s.m1, Some(290));
+        s.place_marker(Marker::M2, 999e6);
+        assert_eq!(s.m2, Some(290));
+        s.m2 = None;
+        s.step_marker(Marker::M2, 1);
+        assert_eq!(s.m2, None);
+    }
+
+    #[test]
+    fn no_result_means_no_markers() {
+        let mut s = state();
+        s.place_marker(Marker::M1, 14e6);
+        s.toggle_marker(Marker::M2);
+        assert_eq!((s.m1, s.m2), (None, None));
+        assert_eq!(s.index_at(14e6), None);
+        assert!(!s.zoom_to_markers());
+        assert!(s.reactance_fields().is_none() && s.bandwidth_fields().is_none() && s.swr_min().is_none());
+    }
+
+    #[test]
+    fn toggle_places_at_thirds() {
+        let mut s = swept();
+        s.toggle_marker(Marker::M1);
+        s.toggle_marker(Marker::M2);
+        assert_eq!((s.m1, s.m2), (Some(97), Some(191)));
+        s.toggle_marker(Marker::M1);
+        assert_eq!(s.m1, None);
+    }
+
+    #[test]
+    fn markers_clamp_when_samples_shrink() {
+        let mut s = swept();
+        s.m1 = Some(280);
+        s.m2 = Some(50);
+        s.on_event(Event::Sweep(fake_result(1_000_000, 30_000_000, 100)));
+        assert_eq!((s.m1, s.m2), (Some(100), Some(50)));
+    }
+
+    #[test]
+    fn zoom_and_unzoom() {
+        let mut s = swept();
+        s.place_marker(Marker::M1, 20e6);
+        s.place_marker(Marker::M2, 10e6);
+        assert!(s.zoom_to_markers());
+        assert_eq!((s.start_hz, s.stop_hz), (10_000_000, 20_000_000));
+        assert_eq!((s.start_text.as_str(), s.stop_text.as_str()), ("10", "20"));
+        assert!(s.unzoom());
+        assert_eq!((s.start_hz, s.stop_hz), (1_000_000, 30_000_000));
+        assert!(!s.unzoom());
+        s.m2 = s.m1;
+        assert!(!s.zoom_to_markers());
+        s.m2 = None;
+        assert!(!s.zoom_to_markers());
+    }
+
+    #[test]
+    fn marker_row_formats() {
+        let mut s = swept();
+        let p = &mut s.result.as_mut().unwrap().points[131];
+        (p.swr, p.z_mag, p.rl_db, p.phase_deg, p.rs, p.xs) = (1.23456, 51.0, 20.129, 17.5, f64::INFINITY, 12345.6);
+        assert_eq!(s.marker_row(131), ["14.100000", "1.23", "51.00", "20.13", "17.50", "\u{221e}", ">9999"]);
+        assert_eq!(s.marker_row(5000), ["", "", "", "", "", "", ""]);
+    }
+
+    #[test]
+    fn reactance_fields_need_both_markers() {
+        let mut s = swept();
+        {
+            let points = &mut s.result.as_mut().unwrap().points;
+            (points[10].l_uh, points[10].c_pf) = (1.5, 300.0);
+            (points[20].l_uh, points[20].c_pf) = (2.5, 100.0);
+        }
+        s.m1 = Some(10);
+        assert!(s.reactance_fields().is_none());
+        s.m2 = Some(20);
+        assert_eq!(s.reactance_fields(), Some((true, "1.50".to_string(), "2.50".to_string())));
+        (s.m1, s.m2) = (Some(20), Some(10));
+        assert_eq!(s.reactance_fields(), Some((false, "100.00".to_string(), "300.00".to_string())));
+    }
+
+    #[test]
+    fn bandwidth_fields() {
+        let mut s = swept();
+        s.place_marker(Marker::M1, 7.0e6);
+        s.place_marker(Marker::M2, 7.2e6);
+        assert_eq!(s.bandwidth_fields(), Some(("200000".to_string(), "35.50".to_string())));
+        s.m2 = s.m1;
+        assert_eq!(s.bandwidth_fields(), None);
+    }
+
+    #[test]
+    fn memo_toggles() {
+        let mut s = state();
+        s.toggle_memo(0.4);
+        assert_eq!(s.memo_y, Some(0.4));
+        s.toggle_memo(0.9);
+        assert_eq!(s.memo_y, None);
+    }
+
+    #[test]
+    fn swr_min_follows_the_result() {
+        let mut s = swept();
+        s.result.as_mut().unwrap().points[77].swr = 1.05;
+        assert_eq!(s.swr_min(), Some(77));
     }
 }

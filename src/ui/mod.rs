@@ -7,6 +7,7 @@ use crate::store::{self, Rgb, Settings};
 use crate::sweep::{self, Command, PortChoice, Worker};
 
 pub mod graph;
+pub mod marker_panel;
 pub mod plot;
 pub mod side_panel;
 pub mod state;
@@ -20,6 +21,10 @@ pub enum Action {
     SweepOnce,
     SweepContinuous,
     Stop,
+    /// Sweep the range between the markers.
+    Zoom,
+    /// Go back to the range before the last zoom.
+    Unzoom,
 }
 
 pub fn color32(c: Rgb) -> egui::Color32 {
@@ -72,7 +77,35 @@ impl App {
                 self.send(Command::Continuous(self.state.request()));
             }
             Action::Stop => self.send(Command::Stop),
+            Action::Zoom => {
+                if self.state.zoom_to_markers() {
+                    self.apply(Action::SweepOnce);
+                }
+            }
+            Action::Unzoom => {
+                if self.state.unzoom() {
+                    self.apply(Action::SweepOnce);
+                }
+            }
         }
+    }
+}
+
+impl App {
+    /// Space = one sweep, F12 = continuous, Esc = stop. Ignored while a text box has the keyboard.
+    fn keys(&self, ui: &egui::Ui, actions: &mut Vec<Action>) {
+        let typing = ui.ctx().text_edit_focused();
+        ui.input(|input| {
+            if input.key_pressed(egui::Key::Escape) {
+                actions.push(Action::Stop);
+            }
+            if input.key_pressed(egui::Key::F12) {
+                actions.push(Action::SweepContinuous);
+            }
+            if input.key_pressed(egui::Key::Space) && !typing {
+                actions.push(Action::SweepOnce);
+            }
+        });
     }
 }
 
@@ -93,19 +126,27 @@ impl eframe::App for App {
                 ui.label(&self.state.status);
             });
         });
+        egui::Panel::top("markers").show(ui, |ui| {
+            marker_panel::show(ui, &mut self.state, &mut actions);
+        });
         egui::Panel::left("controls").resizable(false).show(ui, |ui| {
-            side_panel::show(ui, &mut self.state, &mut actions);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                side_panel::show(ui, &mut self.state, &mut actions);
+            });
         });
         egui::CentralPanel::default().show(ui, |ui| {
             graph::show(ui, &mut self.state, &mut actions);
         });
+
+        marker_panel::entry_dialog(ui.ctx(), &mut self.state);
+        self.keys(ui, &mut actions);
 
         for action in actions {
             self.apply(action);
         }
     }
 
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.send(Command::Shutdown);
         self.state.settings.start_mhz = self.state.start_hz as f64 / 1e6 / self.state.extender as f64;
         self.state.settings.stop_mhz = self.state.stop_hz as f64 / 1e6 / self.state.extender as f64;
@@ -120,8 +161,10 @@ pub fn run(port: PortChoice, settings: Settings, notice: Option<String>, sweep_a
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("minivna")
-            .with_inner_size([1000.0, 640.0])
+            .with_inner_size([1100.0, 760.0])
             .with_min_inner_size([760.0, 480.0]),
+        // OpenGL runs on older graphics hardware where the default renderer draws wrongly.
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native(

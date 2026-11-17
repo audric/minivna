@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 directories = "6.0.0"
-eframe = "0.37.0"
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland", "clipboard"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serialport = "4.10.1"
