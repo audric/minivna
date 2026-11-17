@@ -168,8 +168,9 @@ pub fn build(state: &AppState, colors: &Colors, width: f32, height_px: f32) -> V
         });
     }
 
+    // The SWR and ohm scales are for an instrument that measures impedance (the miniVNA).
     // SWR ticks: dashed lines across, labels just left of the frame.
-    for tick in SWR_TICKS {
+    for tick in SWR_TICKS.into_iter().filter(|_| state.smith_available()) {
         let y = frame.y_of(tick.log10());
         if tick > 1.0 && tick < 10.0 {
             out.push(Prim::Line { points: across(y), color: colors.swr, width: 1.0, dashed: true });
@@ -190,7 +191,7 @@ pub fn build(state: &AppState, colors: &Colors, width: f32, height_px: f32) -> V
         out.push(Prim::Text { pos: [frame.left - 30.0, y - 6.0], text, color: colors.rl, anchor: Anchor::Right });
     }
 
-    if state.settings.line_50_ohms {
+    if state.settings.line_50_ohms && state.smith_available() {
         let y = frame.y_of(50.0 / OHMS_FULL_SCALE);
         out.push(Prim::Line { points: across(y), color: colors.ohms, width: 1.0, dashed: true });
         out.push(Prim::Text { pos: [frame.right - 2.0, y - 13.0], text: "50 ohms".into(), color: colors.ohms, anchor: Anchor::Right });

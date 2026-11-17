@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver};
 
 use eframe::egui;
 
-use crate::device::{find_minivna, list_ports};
+use crate::device::{find_device, list_ports, DeviceKind};
 use crate::sweep::PortChoice;
 use crate::ui::state::AppState;
 use crate::ui::text::t;
@@ -33,16 +33,27 @@ impl PortDialog {
             self.search = None;
             match found {
                 Some(port) => {
-                    self.message = format!("{} {port}", t("MiniVNA found on"));
+                    self.message = format!("{} {} {port}", state.device().name(), t("found on"));
                     actions.push(Action::SetPort(PortChoice::Serial(port)));
                 }
-                None => self.message = t("MiniVNA not Found !").to_string(),
+                None => self.message = format!("{} {}", state.device().name(), t("not found !")),
             }
         }
         let mut open = self.open;
-        egui::Window::new(t("MiniVNA Com-Port")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+        egui::Window::new(t("Device and Com Port")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             let busy = state.busy || self.search.is_some();
-            ui.add_enabled_ui(!busy, |ui| {
+            ui.add_enabled_ui(!busy && !state.device_held, |ui| {
+                ui.label(t("Device :"));
+                for kind in [DeviceKind::MiniVna, DeviceKind::Nwt] {
+                    if ui.radio(state.device() == kind, kind.name()).clicked() && state.device() != kind {
+                        actions.push(Action::SetDevice(kind));
+                    }
+                }
+                if state.device() == DeviceKind::Nwt {
+                    ui.label(t("Transmission loss and generator only (no phase)."));
+                }
+                ui.separator();
+                ui.label(t("Port :"));
                 for port in &self.ports {
                     let selected = *current == PortChoice::Serial(port.clone());
                     if ui.selectable_label(selected, port).clicked() {
@@ -60,8 +71,9 @@ impl PortDialog {
                     if ui.button(t("Automatic search")).clicked() {
                         let (tx, rx) = mpsc::channel();
                         let repaint = ctx.clone();
+                        let kind = state.device();
                         std::thread::spawn(move || {
-                            let _ = tx.send(find_minivna());
+                            let _ = tx.send(find_device(kind));
                             repaint.request_repaint();
                         });
                         self.search = Some(rx);

@@ -3,10 +3,11 @@
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
-use crate::cal::{table_from_sweep, Calibration};
+use crate::cal::{nwt_table_from_sweep, table_from_sweep, Calibration};
 use crate::calc::{apply_sign, convert, Point, RawPoint};
 use crate::device::sim::SimTransport;
-use crate::device::{Device, DeviceError, Mode, SerialTransport, SweepRequest, Transport, F_MAX_HZ, F_MIN_HZ};
+use crate::device::nwt::{self, DB_PER_COUNT_DEFAULT};
+use crate::device::{Device, DeviceError, DeviceKind, Mode, SerialTransport, SweepRequest, Transport, F_MAX_HZ, F_MIN_HZ};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PortChoice {
@@ -20,7 +21,9 @@ pub enum Command {
     Stop,
     /// Mode, step-bug option, DDS factor.
     Calibrate(Mode, bool, f64),
-    Generator { freq_hz: u64, extender: u8, dds_factor: f64 },
+    /// Measure the NWT sweeper's 0 dB reference (output joined to input) over its whole range.
+    CalibrateNwt,
+    Generator { kind: DeviceKind, freq_hz: u64, extender: u8, dds_factor: f64 },
     Park,
     SetPort(PortChoice),
     SetCalibration(Calibration),
@@ -36,6 +39,8 @@ pub struct SweepResult {
     /// The calibration offset used for each point.
     pub cal: Vec<i16>,
     pub points: Vec<Point>,
+    /// NWT sweeper: dB per count used for `points`. Not used for the miniVNA.
+    pub db_per_count: f64,
 }
 
 pub enum Event {
@@ -43,6 +48,7 @@ pub enum Event {
     Progress(f32),
     Sweep(SweepResult),
     CalTable(Mode, Vec<i16>),
+    NwtReference(Vec<i16>),
     Error(String),
 }
 
@@ -71,12 +77,23 @@ impl Worker {
 }
 
 /// Compute a result from raw readings. Also used when a saved sweep is loaded.
-pub fn build_result(request: SweepRequest, raw: Vec<RawPoint>, cal: Vec<i16>, signed: bool) -> SweepResult {
-    let mut points = convert(&raw, &cal, request.start_hz as f64, request.step_hz() as f64);
-    if signed {
-        apply_sign(&mut points);
-    }
-    SweepResult { request, raw, cal, points }
+/// For the NWT sweeper `cal` holds the 0 dB reading at each point and `db_per_count` the
+/// slope of its detector; the miniVNA ignores `db_per_count`.
+pub fn build_result(request: SweepRequest, raw: Vec<RawPoint>, cal: Vec<i16>, signed: bool, db_per_count: f64) -> SweepResult {
+    let points = match request.kind {
+        DeviceKind::Nwt => {
+            let first = request.freqs_hz().first().copied().unwrap_or(request.start_hz as f64);
+            nwt::to_points(&raw, &cal, db_per_count, first, request.step_hz() as f64)
+        }
+        DeviceKind::MiniVna => {
+            let mut points = convert(&raw, &cal, request.start_hz as f64, request.step_hz() as f64);
+            if signed {
+                apply_sign(&mut points);
+            }
+            points
+        }
+    };
+    SweepResult { request, raw, cal, points, db_per_count }
 }
 
 /// Start the worker thread. `wake` is called after every event so the window repaints.
@@ -145,8 +162,13 @@ impl Runner {
                     let outcome = self.calibrate(mode, step_bug, dds_factor);
                     self.finish(outcome.map(|table| Event::CalTable(mode, table)));
                 }
-                Command::Generator { freq_hz, extender, dds_factor } => {
-                    let outcome = self.open().and_then(|d| d.generator(freq_hz, extender, dds_factor));
+                Command::CalibrateNwt => {
+                    self.emit(Event::Busy(true));
+                    let outcome = self.calibrate_nwt();
+                    self.finish(outcome.map(Event::NwtReference));
+                }
+                Command::Generator { kind, freq_hz, extender, dds_factor } => {
+                    let outcome = self.open(kind).and_then(|d| d.generator(freq_hz, extender, dds_factor));
                     if let Err(e) = outcome {
                         self.close();
                         self.emit(Event::Error(e.to_string()));
@@ -219,7 +241,11 @@ impl Runner {
         self.emit(Event::Busy(false));
     }
 
-    fn open(&mut self) -> Result<&mut AnyDevice, DeviceError> {
+    /// The device, opened as the given instrument (each has its own line speed).
+    fn open(&mut self, kind: DeviceKind) -> Result<&mut AnyDevice, DeviceError> {
+        if self.device.as_ref().is_some_and(|d| d.kind() != kind) {
+            self.close();
+        }
         if self.device.is_none() {
             let device = match &self.port {
                 PortChoice::Simulated => {
@@ -228,9 +254,11 @@ impl Runner {
                     let sim = SimTransport { pace: Duration::from_millis(120), ..SimTransport::new() };
                     Device::with_timing(Box::new(sim) as Box<dyn Transport>, Duration::ZERO, Duration::from_secs(1))
                 }
-                PortChoice::Serial(name) => Device::new(Box::new(SerialTransport::open(name)?) as Box<dyn Transport>),
+                PortChoice::Serial(name) => {
+                    Device::new(Box::new(SerialTransport::open_at(name, kind.baud())?) as Box<dyn Transport>)
+                }
             };
-            self.device = Some(device);
+            self.device = Some(device.of_kind(kind));
         }
         Ok(self.device.as_mut().expect("just opened"))
     }
@@ -248,7 +276,7 @@ impl Runner {
 
     fn sweep_raw(&mut self, request: &SweepRequest) -> Result<Vec<RawPoint>, DeviceError> {
         let events = self.events.clone();
-        self.open()?;
+        self.open(request.kind)?;
         let wake = &self.wake;
         let device = self.device.as_mut().expect("open");
         // While the reply is being read, look at what arrives: Stop (or the end of the
@@ -275,13 +303,33 @@ impl Runner {
 
     fn measure(&mut self, request: &SweepRequest) -> Result<SweepResult, DeviceError> {
         let raw = self.sweep_raw(request)?;
+        if request.kind == DeviceKind::Nwt {
+            let reference = self.cal.nwt_reference_at(&request.freqs_hz());
+            return Ok(build_result(*request, raw, reference, false, self.cal.nwt_slope()));
+        }
         let transmission = request.mode == Mode::Transmission;
         let cal = self.cal.offsets(transmission, &request.device_freqs_hz());
-        Ok(build_result(*request, raw, cal, self.signed))
+        Ok(build_result(*request, raw, cal, self.signed, DB_PER_COUNT_DEFAULT))
+    }
+
+    fn calibrate_nwt(&mut self) -> Result<Vec<i16>, DeviceError> {
+        let (start_hz, stop_hz) = DeviceKind::Nwt.range_hz();
+        let request = SweepRequest {
+            kind: DeviceKind::Nwt,
+            mode: Mode::Transmission,
+            start_hz,
+            stop_hz,
+            samples: 1000,
+            extender: 1,
+            dds_factor: 1.0,
+            step_bug: false,
+        };
+        let raw = self.sweep_raw(&request)?;
+        nwt_table_from_sweep(&raw).map_err(|e| DeviceError::Io(e.to_string()))
     }
 
     fn calibrate(&mut self, mode: Mode, step_bug: bool, dds_factor: f64) -> Result<Vec<i16>, DeviceError> {
-        let request = SweepRequest {
+        let request = SweepRequest { kind: crate::device::DeviceKind::MiniVna,
             mode,
             start_hz: F_MIN_HZ as u64,
             stop_hz: F_MAX_HZ as u64,
@@ -301,7 +349,7 @@ mod tests {
     use crate::device::DDS_FACTOR_DEFAULT;
 
     fn req(start: u64, stop: u64, samples: u16) -> SweepRequest {
-        SweepRequest {
+        SweepRequest { kind: crate::device::DeviceKind::MiniVna,
             mode: Mode::Reflection,
             start_hz: start,
             stop_hz: stop,
@@ -373,7 +421,7 @@ mod tests {
     #[test]
     fn calibration_is_applied() {
         let w = worker();
-        let cal = Calibration { reflection: Some(vec![-20; 1000]), transmission: None };
+        let cal = Calibration { reflection: Some(vec![-20; 1000]), transmission: None, ..Default::default() };
         w.tx.send(Command::SetCalibration(cal)).unwrap();
         w.tx.send(Command::Single(req(1_000_000, 30_000_000, 100))).unwrap();
         let events = collect(&w, |e| matches!(e, Event::Busy(false)));
@@ -414,9 +462,9 @@ mod tests {
         w.tx.send(Command::Single(r)).unwrap();
         let events = collect(&w, |e| matches!(e, Event::Busy(false)));
         let got = sweeps(&events)[0];
-        let unsigned = build_result(r, got.raw.clone(), got.cal.clone(), false);
+        let unsigned = build_result(r, got.raw.clone(), got.cal.clone(), false, crate::device::nwt::DB_PER_COUNT_DEFAULT);
         assert!(unsigned.points.iter().all(|p| p.phase_deg >= 0.0 && p.xs >= 0.0));
-        let signed = build_result(r, got.raw.clone(), got.cal.clone(), true);
+        let signed = build_result(r, got.raw.clone(), got.cal.clone(), true, crate::device::nwt::DB_PER_COUNT_DEFAULT);
         assert!(signed.points.iter().any(|p| p.phase_deg < 0.0));
         assert!(signed.points.iter().any(|p| p.phase_deg > 0.0));
     }
@@ -482,6 +530,66 @@ mod tests {
             }
         }
         assert!((1..=10).contains(&sweeps), "{sweeps} sweeps in 0.6 s");
+        w.tx.send(Command::Shutdown).unwrap();
+    }
+
+    fn nwt_req(start: u64, stop: u64, samples: u16) -> SweepRequest {
+        SweepRequest { kind: DeviceKind::Nwt, mode: Mode::Transmission, step_bug: false, ..req(start, stop, samples) }
+    }
+
+    #[test]
+    fn the_nwt_sweeper_gives_loss_against_its_reference() {
+        let cal = Calibration { nwt_reference: Some(vec![600; 1000]), nwt_db_per_count: Some(0.1), ..Default::default() };
+        let w = spawn(PortChoice::Simulated, cal, Box::new(|| {}));
+        w.tx.send(Command::Single(nwt_req(400_000_000, 500_000_000, 100))).unwrap();
+        let result = loop {
+            match next_event(&w) {
+                Event::Sweep(r) => break r,
+                Event::Error(why) => panic!("{why}"),
+                _ => {}
+            }
+        };
+        assert_eq!(result.points.len(), 101);
+        // The simulated filter passes 433 MHz without loss and drops 6 counts per MHz away from it.
+        assert!(result.points[33].rl_db.abs() < 1e-9, "{}", result.points[33].rl_db);
+        assert!((result.points[43].rl_db - 6.0).abs() < 1e-9, "{}", result.points[43].rl_db);
+        assert!(result.points[33].swr.is_nan());
+        assert_eq!(result.cal, vec![600; 101]);
+        w.tx.send(Command::Shutdown).unwrap();
+    }
+
+    #[test]
+    fn the_nwt_reference_is_measured_over_the_whole_range() {
+        let w = spawn(PortChoice::Simulated, Calibration::default(), Box::new(|| {}));
+        w.tx.send(Command::CalibrateNwt).unwrap();
+        let table = loop {
+            match next_event(&w) {
+                Event::NwtReference(table) => break table,
+                Event::Error(why) => panic!("{why}"),
+                _ => {}
+            }
+        };
+        assert_eq!(table.len(), 1000);
+        assert_eq!(table.iter().max(), Some(&595)); // the nearest grid point is 0.785 MHz from 433 MHz
+        w.tx.send(Command::Shutdown).unwrap();
+    }
+
+    #[test]
+    fn one_worker_serves_both_devices_in_turn() {
+        let w = spawn(PortChoice::Simulated, Calibration::default(), Box::new(|| {}));
+        for request in [req(1_000_000, 30_000_000, 100), nwt_req(400_000_000, 500_000_000, 100), req(1_000_000, 30_000_000, 100)] {
+            w.tx.send(Command::Single(request)).unwrap();
+            loop {
+                match next_event(&w) {
+                    Event::Sweep(r) => {
+                        assert_eq!(r.request.kind, request.kind);
+                        break;
+                    }
+                    Event::Error(why) => panic!("{why}"),
+                    _ => {}
+                }
+            }
+        }
         w.tx.send(Command::Shutdown).unwrap();
     }
 }

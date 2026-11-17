@@ -69,7 +69,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
     ui.separator();
     ui.horizontal(|ui| {
         ui.radio_value(&mut state.view, View::Graph, t("Curves"));
-        ui.radio_value(&mut state.view, View::Smith, t("Smith chart"));
+        ui.add_enabled_ui(state.smith_available(), |ui| ui.radio_value(&mut state.view, View::Smith, t("Smith chart")));
     });
     ui.label(t("Graphic :"));
     let colors = state.settings.screen.clone();

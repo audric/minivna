@@ -25,7 +25,7 @@ mod tests {
     use crate::sweep::build_result;
 
     fn result(mode: Mode) -> SweepResult {
-        let request = SweepRequest {
+        let request = SweepRequest { kind: crate::device::DeviceKind::MiniVna,
             mode,
             start_hz: 7_000_000,
             stop_hz: 7_358_000,
@@ -35,7 +35,7 @@ mod tests {
             step_bug: true,
         };
         let raw = vec![RawPoint { phase: 512, level: 514 }, RawPoint { phase: 256, level: 600 }];
-        build_result(request, raw, vec![0, -20], false)
+        build_result(request, raw, vec![0, -20], false, crate::device::nwt::DB_PER_COUNT_DEFAULT)
     }
 
     #[test]

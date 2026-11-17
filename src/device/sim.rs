@@ -22,6 +22,8 @@ pub struct SimTransport {
     pub(crate) reply: VecDeque<u8>,
     /// How long a real device would take to answer a command; zero in tests.
     pub pace: Duration,
+    /// The frequency last set with the NWT generator command.
+    pub nwt_generator_hz: u64,
     pub(crate) ready_at: Option<std::time::Instant>,
 }
 
@@ -34,6 +36,7 @@ impl SimTransport {
             command: Vec::new(),
             reply: VecDeque::new(),
             pace: Duration::ZERO,
+            nwt_generator_hz: 0,
             ready_at: None,
         }
     }
@@ -64,6 +67,61 @@ impl SimTransport {
     }
 }
 
+/// The NWT sweeper side of the simulation: a band-pass filter centred on 433 MHz between
+/// output and input.
+fn filter_reading(freq_hz: f64) -> u16 {
+    let off_mhz = (freq_hz - 433e6).abs() / 1e6;
+    (600.0 - (off_mhz * 6.0).min(540.0)) as u16
+}
+
+impl SimTransport {
+    /// Handle complete commands of the NWT protocol (they start with 0x8f) at the front
+    /// of what has been written; an incomplete one waits for more bytes, like the real unit.
+    fn run_nwt_commands(&mut self) {
+        while self.command.first() == Some(&0x8f) {
+            let Some(&letter) = self.command.get(1) else { return };
+            let digits = match letter {
+                b'a' => 23,
+                b'f' => 9,
+                _ => 0,
+            };
+            if self.command.len() < 2 + digits {
+                return;
+            }
+            let text: String = self.command[2..2 + digits].iter().map(|b| *b as char).collect();
+            self.command.drain(..2 + digits);
+            let number = |range: std::ops::Range<usize>| text.get(range).and_then(|t| t.parse::<u64>().ok()).unwrap_or(0);
+            let reading = |freq_hz: f64| {
+                let level = filter_reading(freq_hz).to_le_bytes();
+                [level[0], level[1], level[0], level[1]]
+            };
+            let mut bytes = Vec::new();
+            match letter {
+                b'v' => bytes.push(119),
+                b'm' => bytes.extend(reading(self.nwt_generator_hz as f64)),
+                b'f' => self.nwt_generator_hz = number(0..9) * 10,
+                b'a' => {
+                    if self.fail_next_replies > 0 {
+                        self.fail_next_replies -= 1;
+                        continue;
+                    }
+                    // Like the real unit, the step's digits from 10 MHz up are ignored.
+                    let (start, step, count) = (number(0..9) * 10, number(11..17) * 10, number(17..21));
+                    for i in 0..count {
+                        bytes.extend(reading((start + i * step) as f64));
+                    }
+                }
+                _ => {}
+            }
+            if let Some(limit) = self.truncate_to {
+                bytes.truncate(limit);
+            }
+            self.reply.extend(bytes);
+            self.ready_at = (!self.pace.is_zero()).then(|| std::time::Instant::now() + self.pace);
+        }
+    }
+}
+
 impl Default for SimTransport {
     fn default() -> Self {
         Self::new()
@@ -91,7 +149,8 @@ impl Transport for SimTransport {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.written.extend_from_slice(bytes);
         self.command.extend_from_slice(bytes);
-        while self.command.iter().filter(|b| **b == b'\r').count() >= 4 {
+        self.run_nwt_commands();
+        while self.command.first() != Some(&0x8f) && self.command.iter().filter(|b| **b == b'\r').count() >= 4 {
             let mut numbers = [0i64; 4];
             for slot in numbers.iter_mut() {
                 let end = self.command.iter().position(|b| *b == b'\r').unwrap_or(0);

@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use crate::cal::Calibration;
-use crate::device::Mode;
+use crate::device::{DeviceKind, Mode};
 use crate::store::{self, Rgb, Settings};
 use crate::sweep::{self, Command, PortChoice, Worker};
 
@@ -44,6 +44,7 @@ pub enum Action {
     /// Pass a command straight to the sweep worker.
     Send(Command),
     SetPort(PortChoice),
+    SetDevice(crate::device::DeviceKind),
     File(FileAction),
     Quit,
 }
@@ -66,6 +67,7 @@ pub enum Dialog {
     Lc,
     Port,
     Calibrate(Mode),
+    CalibrateNwt,
     Dds,
 }
 
@@ -213,7 +215,7 @@ impl App {
                 self.state.settings.signed_phase = signed;
                 self.send(Command::SetSigned(signed));
                 if let Some(r) = self.state.result.take() {
-                    self.state.result = Some(sweep::build_result(r.request, r.raw, r.cal, signed));
+                    self.state.result = Some(sweep::build_result(r.request, r.raw, r.cal, signed, r.db_per_count));
                 }
             }
             Action::AutoLength => {
@@ -229,9 +231,23 @@ impl App {
             Action::Open(Dialog::Lc) => self.dialogs.lc.open = true,
             Action::File(action) => self.file(action),
             Action::Open(Dialog::Port) => self.dialogs.port.open(),
-            Action::Open(Dialog::Calibrate(mode)) => self.dialogs.calibrate.open(mode),
+            Action::Open(Dialog::Calibrate(mode)) => {
+                if self.state.device() == DeviceKind::MiniVna {
+                    self.dialogs.calibrate.open(mode);
+                }
+            }
+            Action::Open(Dialog::CalibrateNwt) => {
+                if self.state.device() == DeviceKind::Nwt {
+                    self.dialogs.calibrate.open_nwt();
+                }
+            }
+            Action::SetDevice(kind) => {
+                if self.state.set_device(kind) {
+                    self.dialogs.calibrate.close();
+                }
+            }
             Action::Open(Dialog::Dds) => {
-                if !self.state.busy {
+                if !self.state.busy && self.state.device() == DeviceKind::MiniVna {
                     let mut more = Vec::new();
                     self.dialogs.dds.open(&self.state, &mut more);
                     more.into_iter().for_each(|a| self.apply(a));
@@ -331,6 +347,12 @@ impl App {
                     self.dialogs.calibrate.finished(stored.map_err(|e| e.to_string()));
                     continue;
                 }
+                sweep::Event::NwtReference(table) => {
+                    let stored = self.state.store_nwt_reference(table, &self.cal_path);
+                    self.send(Command::SetCalibration(self.state.calibration.clone()));
+                    self.dialogs.calibrate.finished(stored.map_err(|e| e.to_string()));
+                    continue;
+                }
                 sweep::Event::Error(why) => {
                     self.dialogs.calibrate.finished(Err(why.clone()));
                     sweep::Event::Error(explain(why))
@@ -373,6 +395,8 @@ impl App {
         });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
+                ui.label(self.state.device().name());
+                ui.separator();
                 ui.label(self.port_name());
                 ui.separator();
                 ui.label(&self.state.status);

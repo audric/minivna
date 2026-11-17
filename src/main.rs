@@ -1,6 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use minivna::device::find_minivna;
+use minivna::device::find_device;
 use minivna::store::{self, Settings};
 use minivna::sweep::PortChoice;
 
@@ -12,11 +12,11 @@ fn main() -> eframe::Result<()> {
         PortChoice::Simulated
     } else if let Some(name) = settings.port.clone() {
         PortChoice::Serial(name)
-    } else if let Some(name) = find_minivna() {
+    } else if let Some(name) = find_device(settings.device) {
         settings.port = Some(name.clone());
         PortChoice::Serial(name)
     } else {
-        notice.get_or_insert_with(|| minivna::ui::text::t("MiniVNA not found: using the simulated device. Choose a port in Configure.").to_string());
+        notice.get_or_insert_with(|| format!("{} {}", settings.device.name(), minivna::ui::text::t("not found: using the simulated device. Choose a port in Configure.")));
         PortChoice::Simulated
     };
 

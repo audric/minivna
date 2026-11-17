@@ -150,6 +150,9 @@ pub struct Settings {
     pub png: Colors,
     pub bands: Vec<Band>,
     pub velocities: Vec<Velocity>,
+    /// Which instrument is on the port.
+    #[serde(default)]
+    pub device: crate::device::DeviceKind,
     /// The mode the program was last in (see `UiMode::key`).
     #[serde(default)]
     pub last_mode: String,
@@ -178,6 +181,7 @@ impl Default for Settings {
             png: Colors::default(),
             bands: default_bands(),
             velocities: default_velocities(),
+            device: Default::default(),
             last_mode: String::new(),
             window: None,
         }

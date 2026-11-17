@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use super::FileError;
 use crate::calc::RawPoint;
-use crate::device::{Mode, SweepRequest};
+use crate::device::nwt::DB_PER_COUNT_DEFAULT;
+use crate::device::{DeviceKind, Mode, SweepRequest};
 
 /// What the window looked like when the sweep was saved.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -30,13 +31,25 @@ pub struct SweepFile {
     /// The calibration offset used for each point.
     pub cal: Vec<i16>,
     pub view: ViewState,
+    /// dB per count of the NWT sweeper's detector; not used for the miniVNA.
+    pub db_per_count: f64,
 }
 
 const FORMAT: u32 = 1;
 
+fn is_minivna(kind: &DeviceKind) -> bool {
+    *kind == DeviceKind::MiniVna
+}
+
 #[derive(Serialize, Deserialize)]
 struct Header {
     format: u32,
+    /// Missing in files written before there was a second device: the miniVNA.
+    #[serde(default, skip_serializing_if = "is_minivna")]
+    device: DeviceKind,
+    /// NWT sweeper only: dB per count used when the sweep was taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_per_count: Option<f64>,
     mode: Mode,
     start_hz: u64,
     stop_hz: u64,
@@ -65,6 +78,8 @@ pub fn save(path: &Path, file: &SweepFile) -> Result<(), FileError> {
     let tables = Tables {
         sweep: Header {
             format: FORMAT,
+            device: r.kind,
+            db_per_count: (r.kind == DeviceKind::Nwt).then_some(file.db_per_count),
             mode: r.mode,
             start_hz: r.start_hz,
             stop_hz: r.stop_hz,
@@ -93,6 +108,7 @@ pub fn load(path: &Path) -> Result<SweepFile, FileError> {
         return Err(bad(format!("format {} is not supported", doc.sweep.format)));
     }
     let request = SweepRequest {
+        kind: doc.sweep.device,
         mode: doc.sweep.mode,
         start_hz: doc.sweep.start_hz,
         stop_hz: doc.sweep.stop_hz,
@@ -123,7 +139,8 @@ pub fn load(path: &Path) -> Result<SweepFile, FileError> {
     let last = raw.len() - 1;
     view.m1 = view.m1.filter(|m| *m <= last);
     view.m2 = view.m2.filter(|m| *m <= last);
-    Ok(SweepFile { request, raw, cal, view })
+    let db_per_count = doc.sweep.db_per_count.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(DB_PER_COUNT_DEFAULT);
+    Ok(SweepFile { request, raw, cal, view, db_per_count })
 }
 
 #[cfg(test)]
@@ -133,7 +150,7 @@ mod tests {
 
     fn sample() -> SweepFile {
         SweepFile {
-            request: SweepRequest {
+            request: SweepRequest { kind: crate::device::DeviceKind::MiniVna,
                 mode: Mode::Reflection,
                 start_hz: 7_000_000,
                 stop_hz: 7_200_000,
@@ -151,6 +168,7 @@ mod tests {
                 scale_60db: true,
                 rl_offset_db: -2.5,
             },
+            db_per_count: DB_PER_COUNT_DEFAULT,
         }
     }
 
@@ -196,5 +214,35 @@ mod tests {
             std::fs::read_to_string(&path).unwrap().replace("m1 = 3", "m1 = 300")
         };
         assert_eq!(load_text(&text).unwrap().view.m1, None);
+    }
+
+    #[test]
+    fn the_device_is_recorded_and_old_files_mean_the_minivna() {
+        use crate::device::DeviceKind;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("filter.mvna");
+        let request = SweepRequest {
+            kind: DeviceKind::Nwt,
+            mode: Mode::Transmission,
+            start_hz: 400_000_000,
+            stop_hz: 500_000_000,
+            samples: 10,
+            extender: 1,
+            dds_factor: 10.73741824,
+            step_bug: false,
+        };
+        let file = SweepFile { request, raw: vec![RawPoint { phase: 0, level: 300 }; 11], cal: vec![600; 11], view: ViewState { m1: None, m2: None, show: [false, false, true, false, false, false], scale_60db: true, rl_offset_db: 0.0 }, db_per_count: 0.125 };
+        save(&path, &file).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(back.request.kind, DeviceKind::Nwt);
+        assert_eq!(back.request.start_hz, 400_000_000);
+        assert_eq!(back.db_per_count, 0.125);
+
+        // A file written before there was a second device has no "device" entry.
+        let text = std::fs::read_to_string(&path).unwrap().replace("device = \"nwt\"\n", "");
+        assert!(!text.contains("device"));
+        std::fs::write(&path, text).unwrap();
+        // ... so it is read as a miniVNA sweep, for which 400 MHz is out of range.
+        assert!(load(&path).is_err());
     }
 }

@@ -13,7 +13,7 @@ use minivna::store;
 use minivna::sweep::{spawn, Command, Event, PortChoice};
 
 fn request(step_bug: bool) -> SweepRequest {
-    SweepRequest { mode: Mode::Reflection, start_hz: 1_000_000, stop_hz: 180_000_000, samples: 500, extender: 1, dds_factor: DDS_FACTOR_DEFAULT, step_bug }
+    SweepRequest { kind: minivna::device::DeviceKind::MiniVna, mode: Mode::Reflection, start_hz: 1_000_000, stop_hz: 180_000_000, samples: 500, extender: 1, dds_factor: DDS_FACTOR_DEFAULT, step_bug }
 }
 
 /// Send four command parts as the driver does and read `points` points.

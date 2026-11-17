@@ -31,8 +31,11 @@ pub fn save_sweep(state: &AppState, path: &Path) -> Result<PathBuf, String> {
 /// Show a saved sweep. On any failure the state is left as it was.
 pub fn open_sweep(state: &mut AppState, path: &Path) -> Result<(), String> {
     let file = sweep_file::load(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    state.load_sweep_file(file);
-    Ok(())
+    if state.load_sweep_file(file) {
+        Ok(())
+    } else {
+        Err(state.status.clone())
+    }
 }
 
 pub fn save_csv(state: &AppState, path: &Path) -> Result<PathBuf, String> {

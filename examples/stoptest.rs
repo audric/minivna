@@ -8,7 +8,7 @@ use minivna::sweep::{spawn, Command, Event, PortChoice};
 fn main() {
     let port = std::env::args().nth(1).expect("usage: stoptest <serial port>");
     let mut w = spawn(PortChoice::Serial(port), Calibration::default(), Box::new(|| {}));
-    let request = |samples| SweepRequest { mode: Mode::Reflection, start_hz: 1_000_000, stop_hz: 180_000_000, samples, extender: 1, dds_factor: DDS_FACTOR_DEFAULT, step_bug: true };
+    let request = |samples| SweepRequest { kind: minivna::device::DeviceKind::MiniVna, mode: Mode::Reflection, start_hz: 1_000_000, stop_hz: 180_000_000, samples, extender: 1, dds_factor: DDS_FACTOR_DEFAULT, step_bug: true };
     for round in 0..3 {
         let started = Instant::now();
         w.tx.send(Command::Single(request(1000))).unwrap();

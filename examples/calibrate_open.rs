@@ -30,7 +30,7 @@ fn main() {
     println!("saved to {}", path.display());
 
     worker.tx.send(Command::SetCalibration(cal)).unwrap();
-    let request = SweepRequest {
+    let request = SweepRequest { kind: minivna::device::DeviceKind::MiniVna,
         mode: Mode::Reflection,
         start_hz: 1_000_000,
         stop_hz: 180_000_000,

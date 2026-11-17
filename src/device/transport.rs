@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use super::{Device, DeviceError, Mode, SweepRequest, DDS_FACTOR_DEFAULT};
+use super::{Device, DeviceError, DeviceKind, Mode, SweepRequest, DDS_FACTOR_DEFAULT};
 
 /// A byte channel to a miniVNA, real or simulated.
 pub trait Transport: Send {
@@ -35,8 +35,13 @@ pub struct SerialTransport {
 
 impl SerialTransport {
     /// 115200 8N1, no flow control, DTR and RTS asserted.
+    /// Open a port at the miniVNA's speed.
     pub fn open(port: &str) -> Result<Self, DeviceError> {
-        let mut handle = serialport::new(port, 115_200)
+        Self::open_at(port, 115_200)
+    }
+
+    pub fn open_at(port: &str, baud: u32) -> Result<Self, DeviceError> {
+        let mut handle = serialport::new(port, baud)
             .data_bits(serialport::DataBits::Eight)
             .parity(serialport::Parity::None)
             .stop_bits(serialport::StopBits::One)
@@ -90,7 +95,7 @@ pub fn probe_port(port: &str) -> bool {
         return false;
     };
     let mut device = Device::with_timing(transport, Duration::from_millis(10), Duration::from_secs(1));
-    let request = SweepRequest {
+    let request = SweepRequest { kind: crate::device::DeviceKind::MiniVna,
         mode: Mode::Reflection,
         start_hz: 1_000_000,
         stop_hz: 2_000_000,
@@ -118,6 +123,52 @@ pub fn could_be_minivna(kind: &serialport::SerialPortType) -> bool {
     }
 }
 
+/// Whether an NWT sweeper answers on this port: it replies to the version query with one byte.
+pub fn probe_nwt(port: &str) -> bool {
+    let Ok(mut transport) = SerialTransport::open_at(port, DeviceKind::Nwt.baud()) else {
+        return false;
+    };
+    answers_nwt_version(&mut transport, Duration::from_millis(600))
+}
+
+/// Send the NWT version query and wait for its one-byte answer.
+pub fn answers_nwt_version(transport: &mut dyn Transport, patience: Duration) -> bool {
+    if transport.discard_input().is_err() || transport.write(&crate::device::nwt::VERSION_QUERY).is_err() {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + patience;
+    let mut byte = [0u8; 1];
+    while std::time::Instant::now() < deadline {
+        match transport.read(&mut byte, Duration::from_millis(50)) {
+            Ok(1) => return true,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// The first port on which the given instrument answers. An FTDI chip is a miniVNA's,
+/// so the NWT sweeper (CH340 or similar) is looked for on the other ports.
+pub fn find_device(kind: DeviceKind) -> Option<String> {
+    match kind {
+        DeviceKind::MiniVna => find_minivna(),
+        DeviceKind::Nwt => {
+            let ports = serialport::available_ports().unwrap_or_default();
+            ports.into_iter().filter(|p| could_be_nwt(&p.port_type)).map(|p| p.port_name).find(|port| probe_nwt(port))
+        }
+    }
+}
+
+pub fn could_be_nwt(kind: &serialport::SerialPortType) -> bool {
+    match kind {
+        serialport::SerialPortType::UsbPort(usb) => usb.vid != FTDI_VID,
+        serialport::SerialPortType::Unknown => true,
+        _ => false,
+    }
+}
+
 pub fn find_minivna() -> Option<String> {
     let ports = serialport::available_ports().unwrap_or_default();
     ports.into_iter().filter(|p| could_be_minivna(&p.port_type)).map(|p| p.port_name).find(|port| probe_port(port))
@@ -140,5 +191,26 @@ mod tests {
         assert!(!could_be_minivna(&SerialPortType::BluetoothPort));
         assert!(!could_be_minivna(&SerialPortType::PciPort));
         assert!(could_be_minivna(&SerialPortType::Unknown)); // cannot tell: try it
+    }
+
+    #[test]
+    fn the_nwt_sweeper_is_recognised_by_its_version_answer() {
+        use crate::device::sim::SimTransport;
+        let mut sim = SimTransport::new();
+        assert!(answers_nwt_version(&mut sim, Duration::from_millis(200)));
+        assert_eq!(sim.written, vec![0x8f, b'v']);
+        // Something that says nothing is not one.
+        let mut silent = SimTransport { truncate_to: Some(0), ..SimTransport::new() };
+        assert!(!answers_nwt_version(&mut silent, Duration::from_millis(60)));
+    }
+
+    #[test]
+    fn each_device_is_looked_for_on_its_own_kind_of_port() {
+        use serialport::{SerialPortType, UsbPortInfo};
+        let usb = |vid| SerialPortType::UsbPort(UsbPortInfo { vid, pid: 1, serial_number: None, manufacturer: None, product: None });
+        assert!(could_be_nwt(&usb(0x1a86)) && !could_be_minivna(&usb(0x1a86)));
+        assert!(!could_be_nwt(&usb(0x0403)) && could_be_minivna(&usb(0x0403)));
+        assert!(could_be_nwt(&SerialPortType::Unknown));
+        assert!(!could_be_nwt(&SerialPortType::BluetoothPort));
     }
 }

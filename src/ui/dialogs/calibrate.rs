@@ -22,12 +22,30 @@ enum Step {
 pub struct CalDialog {
     step: Step,
     mode: Option<Mode>,
+    /// The NWT sweeper's reference is being measured, not one of the miniVNA's tables.
+    nwt: bool,
 }
 
 impl CalDialog {
     pub fn open(&mut self, mode: Mode) {
         self.mode = Some(mode);
+        self.nwt = false;
         self.step = Step::Instruction;
+    }
+
+    /// The NWT sweeper's 0 dB reference: output joined to input.
+    pub fn open_nwt(&mut self) {
+        self.mode = Some(Mode::Transmission);
+        self.nwt = true;
+        self.step = Step::Instruction;
+    }
+
+    pub fn close(&mut self) {
+        self.step = Step::Closed;
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.step != Step::Closed
     }
 
     pub fn is_measuring(&self) -> bool {
@@ -50,6 +68,7 @@ impl CalDialog {
             return;
         }
         let (title, instruction) = match mode {
+            _ if self.nwt => (t("Reference Calibrate :"), t("Connect the output to the input with a short cable,")),
             Mode::Transmission => (t("Transmission Calibrate :"), t("Connect DUT and DET with the shortest possible link,")),
             Mode::Reflection => (t("Reflection Calibrate :"), t("Remove any connection between DUT and DET,")),
         };
@@ -61,7 +80,11 @@ impl CalDialog {
                     ui.label(t("then click on Ok."));
                     ui.horizontal(|ui| {
                         if ui.add_enabled(!state.busy, egui::Button::new(t("Ok"))).clicked() {
-                            actions.push(Action::Send(Command::Calibrate(mode, state.settings.step_bug, state.settings.dds_factor)));
+                            actions.push(Action::Send(if self.nwt {
+                                Command::CalibrateNwt
+                            } else {
+                                Command::Calibrate(mode, state.settings.step_bug, state.settings.dds_factor)
+                            }));
                             self.step = Step::Measuring;
                         }
                         close = ui.button(t("Cancel")).clicked();
@@ -77,7 +100,7 @@ impl CalDialog {
                 }
                 Step::Done => {
                     ui.label(t("Ended operations."));
-                    ui.label(t("Your MiniVNA is calibrated."));
+                    ui.label(if self.nwt { t("The reference is stored.") } else { t("Your MiniVNA is calibrated.") });
                     close = ui.button(t("Ok")).clicked();
                 }
                 Step::Failed(why) => {

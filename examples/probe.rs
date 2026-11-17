@@ -8,7 +8,7 @@ fn main() {
     let port = std::env::args().nth(1).expect("usage: probe <serial port>");
     let transport = SerialTransport::open(&port).expect("open port");
     let mut device = Device::new(transport);
-    let request = SweepRequest {
+    let request = SweepRequest { kind: minivna::device::DeviceKind::MiniVna,
         mode: Mode::Reflection,
         start_hz: 1_000_000,
         stop_hz: 180_000_000,

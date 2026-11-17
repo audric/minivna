@@ -74,3 +74,19 @@ Needs a Rust toolchain (rustup.rs). On Debian/Ubuntu also:
   `plot.rs` turns it into shapes, the rest paints
 - `docs/reverse-engineering/` — what was read from the original program
 - `docs/hardware-checks.md` — what was measured on a real device
+
+## A second instrument: the 35-4400 MHz sweeper
+
+The program can also drive the small "35-4400 MHz spectrum analyzer / sweep source"
+boxes that speak the NWT protocol (tested with one unit, firmware byte 119). Choose it
+in Configure, Device and Com Port. It has a detector without phase, so with it the
+program offers:
+
+- transmission loss (output, device under test, input) with markers, bands, zoom,
+  continuous sweep and CSV/PNG export;
+- the generator.
+
+SWR, impedance, phase, the Smith chart and the cable modes need the miniVNA and are
+switched off. Calibrate with Configure, Calibrate Reference (output joined to input).
+The dB scale is approximate until the detector's slope has been measured; see
+`docs/reverse-engineering/nwt-sweeper-findings.md`.

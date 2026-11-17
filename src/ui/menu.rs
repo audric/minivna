@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use super::state::{AppState, UiMode};
-use crate::device::Mode;
+use crate::device::{DeviceKind, Mode};
 use super::text::t;
 use super::{Action, Dialog, FileAction};
 
@@ -68,7 +68,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
             for (mode, key) in MODES {
                 let shortcut = format!("Ctrl+{}", key.name());
                 let button = egui::Button::new(t(mode.name())).selected(state.mode == mode).shortcut_text(shortcut);
-                if ui.add(button).clicked() {
+                if ui.add_enabled(state.mode_available(mode), button).clicked() {
                     actions.push(Action::SetMode(mode));
                     ui.close();
                 }
@@ -76,10 +76,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
         });
 
         ui.menu_button(t("Bands predefined"), |ui| {
-            if item(ui, "160 - 10 m", "Ctrl+D") {
+            let minivna = state.device() == DeviceKind::MiniVna;
+            if ui.add_enabled(minivna, egui::Button::new("160 - 10 m").shortcut_text("Ctrl+D")).clicked() {
                 actions.push(Action::HfRange);
+                ui.close();
             }
-            if item(ui, "1 - 180 MHz", "Ctrl+F") {
+            if item(ui, if minivna { "1 - 180 MHz" } else { "35 - 4400 MHz" }, "Ctrl+F") {
                 actions.push(Action::FullRange);
             }
             ui.separator();
@@ -95,7 +97,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
             }
         });
 
-        if state.settings.extender_menu {
+        if state.settings.extender_menu && state.device() == DeviceKind::MiniVna {
             ui.menu_button(t("Frequency Extender"), |ui| {
                 for (mult, name) in [(1u8, t("Disabled")), (4, "x 4"), (8, "x 8"), (16, "x 16")] {
                     if ui.add(egui::Button::new(name).selected(state.extender == mult)).clicked() {
@@ -113,20 +115,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
             ui.checkbox(&mut state.settings.markers_from_band, t("Position M1 and M2 by the band's defaults"));
             ui.separator();
             let mut signed = state.settings.signed_phase;
-            if ui.checkbox(&mut signed, t("Estimate sign of phase and Xs")).changed() {
+            let has_phase = state.device() == DeviceKind::MiniVna;
+            if ui.add_enabled(has_phase, egui::Checkbox::new(&mut signed, t("Estimate sign of phase and Xs"))).changed() {
                 actions.push(Action::SetSigned(signed));
             }
         });
 
         ui.menu_button(t("Configure"), |ui| {
-            for (name, dialog) in [
-                (t("Com Port"), Dialog::Port),
-                (t("Calibrate DDS frequency"), Dialog::Dds),
-                (t("Calibrate Reflection"), Dialog::Calibrate(Mode::Reflection)),
-                (t("Calibrate Transmission"), Dialog::Calibrate(Mode::Transmission)),
-            ] {
+            let entries: &[(&str, Dialog)] = match state.device() {
+                DeviceKind::MiniVna => &[
+                    (t("Device and Com Port"), Dialog::Port),
+                    (t("Calibrate DDS frequency"), Dialog::Dds),
+                    (t("Calibrate Reflection"), Dialog::Calibrate(Mode::Reflection)),
+                    (t("Calibrate Transmission"), Dialog::Calibrate(Mode::Transmission)),
+                ],
+                DeviceKind::Nwt => &[(t("Device and Com Port"), Dialog::Port), (t("Calibrate Reference (0 dB)"), Dialog::CalibrateNwt)],
+            };
+            for (name, dialog) in entries {
                 if item(ui, name, "") {
-                    actions.push(Action::Open(dialog));
+                    actions.push(Action::Open(*dialog));
                 }
             }
             ui.separator();

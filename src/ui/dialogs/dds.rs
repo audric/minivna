@@ -27,7 +27,7 @@ impl DdsDialog {
     }
 
     fn send(&self, actions: &mut Vec<Action>) {
-        actions.push(Action::Send(Command::Generator { freq_hz: self.freq_hz, extender: 1, dds_factor: self.trial }));
+        actions.push(Action::Send(Command::Generator { kind: crate::device::DeviceKind::MiniVna, freq_hz: self.freq_hz, extender: 1, dds_factor: self.trial }));
     }
 
     pub fn show(&mut self, ctx: &egui::Context, state: &mut AppState, actions: &mut Vec<Action>) {

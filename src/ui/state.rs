@@ -11,7 +11,7 @@ use crate::calc::tools::{
     bandwidth_q, cable_length_m, cable_loss, quarter_wave_crossings, refine_to_90, swr_min_index, velocity_from_length,
 };
 use crate::calc::Point;
-use crate::device::{Mode, SweepRequest, F_MAX_HZ, F_MIN_HZ};
+use crate::device::{DeviceKind, Mode, SweepRequest, F_MAX_HZ, F_MIN_HZ};
 use crate::store::Settings;
 use crate::calc::tools::{lc_resonance, max_rl_index, min_rl_index};
 use crate::store::sweep_file::{SweepFile, ViewState};
@@ -178,10 +178,85 @@ impl AppState {
             first_result_seen: false,
             auto_pass: 0,
         }
+        .fitted_to_device()
+    }
+
+    /// Bring a saved mode and range inside what the saved instrument can do.
+    fn fitted_to_device(mut self) -> Self {
+        if !self.mode_available(self.mode) {
+            self.mode = UiMode::Transmission;
+        }
+        if self.settings.device == DeviceKind::Nwt {
+            self.scale_60db = true;
+        }
+        if !self.range_is_valid(self.start_hz, self.stop_hz, self.samples) {
+            self.apply_full_range();
+        }
+        self
     }
 
     fn limits_hz(&self) -> (u64, u64) {
-        (F_MIN_HZ as u64 * self.extender as u64, F_MAX_HZ as u64 * self.extender as u64)
+        let (low, high) = self.settings.device.range_hz();
+        (low * self.extender as u64, high * self.extender as u64)
+    }
+
+    pub fn device(&self) -> DeviceKind {
+        self.settings.device
+    }
+
+    /// Change which instrument the program talks to. Refused while the device is in use.
+    /// What the old instrument measured is dropped, and the mode and range are brought
+    /// inside what the new one can do.
+    pub fn set_device(&mut self, kind: DeviceKind) -> bool {
+        if self.busy || self.device_held {
+            self.status = t("Stop the sweep before changing the device.").to_string();
+            return false;
+        }
+        if kind == self.settings.device {
+            return true;
+        }
+        self.settings.device = kind;
+        self.extender = 1;
+        self.result = None;
+        (self.m1, self.m2) = (None, None);
+        self.auto_pass = 0;
+        self.band_markers_pending = false;
+        if !self.mode_available(self.mode) {
+            self.mode = UiMode::Transmission;
+            self.settings.last_mode = self.mode.key().to_string();
+        }
+        if !self.smith_available() {
+            self.view = View::Graph;
+        }
+        // Its detector spans well over 30 dB.
+        self.scale_60db = kind == DeviceKind::Nwt;
+        self.zoom_stack.clear();
+        self.current_band = None;
+        if !self.range_is_valid(self.start_hz, self.stop_hz, self.samples) {
+            self.apply_full_range();
+        }
+        self.refresh_texts();
+        true
+    }
+
+    /// Whether the current instrument can work in this mode.
+    pub fn mode_available(&self, mode: UiMode) -> bool {
+        self.settings.device == DeviceKind::MiniVna || matches!(mode, UiMode::Transmission | UiMode::Generator)
+    }
+
+    /// The mode to go back to when the generator window closes.
+    pub fn idle_mode(&self) -> UiMode {
+        if self.mode_available(UiMode::Antenna) { UiMode::Antenna } else { UiMode::Transmission }
+    }
+
+    /// The Smith chart needs phase, which only the miniVNA measures.
+    pub fn smith_available(&self) -> bool {
+        self.settings.device == DeviceKind::MiniVna
+    }
+
+    /// Whether the NWT sweeper's 0 dB reference has been measured.
+    pub fn nwt_calibrated(&self) -> bool {
+        self.calibration.nwt_reference.is_some()
     }
 
     fn range_is_valid(&self, start_hz: u64, stop_hz: u64, samples: u16) -> bool {
@@ -249,14 +324,17 @@ impl AppState {
 
     /// The sweep the current state asks for.
     pub fn request(&self) -> SweepRequest {
+        let nwt = self.settings.device == DeviceKind::Nwt;
         SweepRequest {
-            mode: self.sweep_mode(),
+            kind: self.settings.device,
+            mode: if nwt { Mode::Transmission } else { self.sweep_mode() },
             start_hz: self.start_hz,
             stop_hz: self.stop_hz,
             samples: self.samples,
             extender: self.extender,
             dds_factor: self.settings.dds_factor,
-            step_bug: self.settings.step_bug,
+            // The first-point fault belongs to the miniVNA's firmware.
+            step_bug: self.settings.step_bug && !nwt,
         }
     }
 
@@ -290,7 +368,7 @@ impl AppState {
                     self.toggle_marker(Marker::M1);
                 }
             }
-            Event::CalTable(..) => {}
+            Event::CalTable(..) | Event::NwtReference(..) => {}
             Event::Error(text) => {
                 self.status = text;
                 self.busy = false;
@@ -302,6 +380,9 @@ impl AppState {
 
     /// In transmission mode only loss and phase mean anything.
     pub fn curve_available(&self, curve: Curve) -> bool {
+        if self.settings.device == DeviceKind::Nwt {
+            return curve == Curve::Rl; // a detector without phase: loss only
+        }
         self.mode != UiMode::Transmission || matches!(curve, Curve::Rl | Curve::Phase)
     }
 
@@ -522,6 +603,10 @@ impl AppState {
             self.status = t("Close the generator window first.").to_string();
             return false;
         }
+        if !self.mode_available(mode) {
+            self.status = format!("{} {}", self.settings.device.name(), t("measures transmission loss only."));
+            return false;
+        }
         if mode == UiMode::Generator && self.busy {
             self.status = t("Stop the sweep before using the generator.").to_string();
             return false;
@@ -576,8 +661,16 @@ impl AppState {
 
     /// The whole range of the device: 1 to 180 MHz, times the extender.
     pub fn apply_full_range(&mut self) {
-        let mult = self.extender as u64;
-        self.new_range(1_000_000 * mult, 180_000_000 * mult);
+        match self.settings.device {
+            DeviceKind::MiniVna => {
+                let mult = self.extender as u64;
+                self.new_range(1_000_000 * mult, 180_000_000 * mult);
+            }
+            DeviceKind::Nwt => {
+                let (low, high) = DeviceKind::Nwt.range_hz();
+                self.new_range(low, high);
+            }
+        }
     }
 
     /// "160 - 10 m".
@@ -587,7 +680,7 @@ impl AppState {
 
     /// Select a frequency extender (1 = none, 4, 8 or 16). The range becomes the full range.
     pub fn set_extender(&mut self, mult: u8) {
-        if [1, 4, 8, 16].contains(&mult) && mult != self.extender {
+        if [1, 4, 8, 16].contains(&mult) && mult != self.extender && self.settings.device == DeviceKind::MiniVna {
             self.extender = mult;
             self.apply_full_range();
         }
@@ -675,9 +768,20 @@ pub fn nudge_dds(trial: f64, step: f64) -> f64 {
 
 /// Change the generator frequency by `delta` Hz, staying within what the device can do.
 pub fn generator_freq_step(freq_hz: u64, delta: i64, extender: u8) -> u64 {
-    let mult = extender.max(1) as i64;
-    let (low, high) = (F_MIN_HZ as i64 * mult, F_MAX_HZ as i64 * mult);
-    (freq_hz as i64 + delta).clamp(low, high) as u64
+    generator_freq_step_for(DeviceKind::MiniVna, freq_hz, delta, extender)
+}
+
+/// A generator frequency moved by `delta` and kept inside what the instrument can make.
+pub fn generator_freq_step_for(kind: DeviceKind, freq_hz: u64, delta: i64, extender: u8) -> u64 {
+    let (low, high) = kind.range_hz();
+    match kind {
+        DeviceKind::MiniVna => {
+            let mult = extender.max(1) as i64;
+            (freq_hz as i64 + delta).clamp(low as i64 * mult, high as i64 * mult) as u64
+        }
+        // It counts in tens of Hz.
+        DeviceKind::Nwt => (freq_hz as i64 + delta).clamp(low as i64, high as i64) as u64 / 10 * 10,
+    }
 }
 
 impl AppState {
@@ -690,6 +794,15 @@ impl AppState {
             Mode::Reflection => self.calibration.reflection = Some(table),
             Mode::Transmission => self.calibration.transmission = Some(table),
         }
+        self.calibration.save(path)
+    }
+
+    /// Keep a freshly measured 0 dB reference of the NWT sweeper and write the calibration file.
+    pub fn store_nwt_reference(&mut self, table: Vec<i16>, path: &Path) -> Result<(), CalError> {
+        if table.len() != CAL_POINTS {
+            return Err(CalError::Format(format!("{} entries, expected {CAL_POINTS}", table.len())));
+        }
+        self.calibration.nwt_reference = Some(table);
         self.calibration.save(path)
     }
 }
@@ -717,13 +830,26 @@ impl AppState {
                 scale_60db: self.scale_60db,
                 rl_offset_db: self.rl_offset_db,
             },
+            db_per_count: result.db_per_count,
         })
     }
 
     /// Show a saved sweep: range, mode, markers and view come from the file and the
     /// values are recomputed from its raw readings.
-    pub fn load_sweep_file(&mut self, file: SweepFile) {
-        let SweepFile { request, raw, cal, view } = file;
+    ///
+    /// False, with a message, if the sweep was made with the other kind of instrument:
+    /// its range and curves would not fit the one in use.
+    pub fn load_sweep_file(&mut self, file: SweepFile) -> bool {
+        let SweepFile { request, raw, cal, view, db_per_count } = file;
+        if request.kind != self.settings.device {
+            self.status = format!(
+                "{} {}. {}",
+                t("This sweep was made with:"),
+                request.kind.name(),
+                t("Choose that device in Configure, Com Port, to open it.")
+            );
+            return false;
+        }
         self.extender = request.extender;
         self.mode = match request.mode {
             Mode::Transmission => UiMode::Transmission,
@@ -736,7 +862,7 @@ impl AppState {
         self.current_band = None;
         self.band_markers_pending = false;
         self.auto_pass = 0;
-        self.result = Some(build_result(request, raw, cal, self.settings.signed_phase));
+        self.result = Some(build_result(request, raw, cal, self.settings.signed_phase, db_per_count));
         self.first_result_seen = true;
         (self.m1, self.m2) = (view.m1, view.m2);
         self.show = view.show;
@@ -747,6 +873,7 @@ impl AppState {
             self.settings.extender_menu = true;
         }
         self.status.clear();
+        true
     }
 
     /// The LC calculator: the capacitance in pF that resonates with `value` µH at marker 1's
@@ -782,7 +909,8 @@ impl AppState {
     /// text is not a frequency or would leave the band without a valid range.
     pub fn set_band_field(&mut self, index: usize, field: BandField, text: &str) -> bool {
         let (Some(band), Some(mhz)) = (self.settings.bands.get_mut(index), parse_mhz(text)) else { return false };
-        let (lowest, highest) = (F_MIN_HZ as f64 / 1e6, F_MAX_HZ as f64 / 1e6 * 16.0);
+        // From the miniVNA's lowest frequency to the NWT sweeper's highest.
+        let (lowest, highest) = (F_MIN_HZ as f64 / 1e6, DeviceKind::Nwt.range_hz().1 as f64 / 1e6);
         let (mut start, mut stop, mut m1, mut m2) = (band.start_mhz, band.stop_mhz, band.m1_mhz, band.m2_mhz);
         match field {
             BandField::Start => start = mhz,
@@ -907,7 +1035,7 @@ pub(crate) mod tests {
     }
 
     pub fn fake_result(start: u64, stop: u64, samples: u16) -> SweepResult {
-        let request = SweepRequest {
+        let request = SweepRequest { kind: crate::device::DeviceKind::MiniVna,
             mode: Mode::Reflection,
             start_hz: start,
             stop_hz: stop,
@@ -917,7 +1045,7 @@ pub(crate) mod tests {
             step_bug: true,
         };
         let n = samples as usize + 1;
-        build_result(request, vec![RawPoint { phase: 100, level: 500 }; n], vec![0; n], false)
+        build_result(request, vec![RawPoint { phase: 100, level: 500 }; n], vec![0; n], false, crate::device::nwt::DB_PER_COUNT_DEFAULT)
     }
 
     #[test]
@@ -1516,5 +1644,203 @@ pub(crate) mod tests {
         s.set_range(7_000_000, 7_200_000);
         s.set_extender(1);
         assert_eq!((s.start_hz, s.stop_hz), (7_000_000, 7_200_000));
+    }
+
+    mod second_device {
+        use super::*;
+        use crate::device::DeviceKind;
+
+        fn nwt() -> AppState {
+            let mut s = state();
+            assert!(s.set_device(DeviceKind::Nwt));
+            s
+        }
+
+        #[test]
+        fn choosing_the_nwt_sweeper_changes_range_and_mode() {
+            let mut s = swept();
+            s.zoom_stack.push((1, 2));
+            assert!(s.set_device(DeviceKind::Nwt));
+            assert_eq!(s.settings.device, DeviceKind::Nwt);
+            assert_eq!(s.mode, UiMode::Transmission);
+            assert_eq!((s.start_hz, s.stop_hz, s.extender), (35_000_000, 4_400_000_000, 1));
+            assert_eq!((s.start_text.as_str(), s.stop_text.as_str()), ("35", "4400"));
+            assert!(s.result.is_none() && s.zoom_stack.is_empty() && s.m1.is_none());
+            let request = s.request();
+            assert_eq!((request.kind, request.mode, request.step_bug, request.extender), (DeviceKind::Nwt, Mode::Transmission, false, 1));
+            assert_eq!(request.validate(), Ok(()));
+        }
+
+        #[test]
+        fn the_nwt_sweeper_offers_only_transmission_loss_and_the_generator() {
+            let mut s = nwt();
+            assert!(s.curve_available(Curve::Rl));
+            for curve in [Curve::Swr, Curve::Z, Curve::Phase, Curve::Rs, Curve::Xs] {
+                assert!(!s.curve_available(curve), "{curve:?}");
+            }
+            for mode in [UiMode::Antenna, UiMode::CableLength, UiMode::CableLoss] {
+                assert!(!s.mode_available(mode));
+                assert!(!s.set_mode(mode), "{mode:?}");
+                assert_eq!(s.mode, UiMode::Transmission);
+            }
+            assert!(!s.status.is_empty());
+            assert!(s.set_mode(UiMode::Generator));
+            assert!(s.set_mode(UiMode::Transmission));
+            assert!(!s.smith_available());
+            assert_eq!(s.idle_mode(), UiMode::Transmission);
+            assert_eq!(state().idle_mode(), UiMode::Antenna);
+            s.view = View::Smith;
+            assert!(s.set_device(DeviceKind::MiniVna));
+            assert!(s.smith_available() && s.mode_available(UiMode::Antenna));
+        }
+
+        #[test]
+        fn ranges_follow_the_device() {
+            let mut s = nwt();
+            assert!(s.range_error(34_000_000, 100_000_000, 500).is_some());
+            assert!(s.range_error(100_000_000, 4_400_000_001, 500).is_some());
+            assert!(s.range_error(430_000_000, 440_000_000, 500).is_none());
+            (s.start_text, s.stop_text) = ("430".into(), "440".into());
+            assert!(s.commit_range());
+            s.apply_full_range();
+            assert_eq!((s.start_hz, s.stop_hz), (35_000_000, 4_400_000_000));
+            // The extender belongs to the miniVNA.
+            s.set_extender(4);
+            assert_eq!(s.extender, 1);
+            // Back to the miniVNA: a range it cannot make is replaced by its full range.
+            assert!(s.set_device(DeviceKind::MiniVna));
+            assert_eq!((s.start_hz, s.stop_hz), (1_000_000, 180_000_000));
+            assert_eq!(s.mode, UiMode::Transmission);
+        }
+
+        #[test]
+        fn a_range_both_devices_can_make_is_kept() {
+            let mut s = state();
+            (s.start_text, s.stop_text) = ("144".into(), "146".into());
+            assert!(s.commit_range());
+            assert!(s.set_device(DeviceKind::Nwt));
+            assert_eq!((s.start_hz, s.stop_hz), (144_000_000, 146_000_000));
+        }
+
+        #[test]
+        fn the_device_cannot_change_while_it_is_in_use() {
+            let mut s = state();
+            s.busy = true;
+            assert!(!s.set_device(DeviceKind::Nwt));
+            s.busy = false;
+            s.device_held = true;
+            assert!(!s.set_device(DeviceKind::Nwt));
+            assert_eq!(s.settings.device, DeviceKind::MiniVna);
+            s.device_held = false;
+            assert!(s.set_device(DeviceKind::MiniVna)); // nothing to do
+            assert_eq!(s.start_hz, (s.settings.start_mhz * 1e6) as u64);
+        }
+
+        #[test]
+        fn bands_above_180_mhz_are_reachable_with_the_nwt_sweeper() {
+            let mut s = nwt();
+            let index = |s: &AppState, name: &str| s.settings.bands.iter().position(|b| b.name == name).unwrap();
+            let (b70, b20) = (index(&s, "70cm"), index(&s, "20m"));
+            assert!(s.band_reachable(b70) && !s.band_reachable(b20));
+            assert!(s.apply_band(b70));
+            assert_eq!(s.start_hz, (s.settings.bands[b70].start_mhz * 1e6).round() as u64);
+        }
+
+        #[test]
+        fn generator_steps_stay_inside_the_device() {
+            assert_eq!(generator_freq_step_for(DeviceKind::Nwt, 100_000_000, -100_000_000, 1), 35_000_000);
+            assert_eq!(generator_freq_step_for(DeviceKind::Nwt, 4_399_000_000, 10_000_000, 1), 4_400_000_000);
+            assert_eq!(generator_freq_step_for(DeviceKind::Nwt, 145_000_004, 0, 1), 145_000_000); // tens of Hz
+            assert_eq!(generator_freq_step_for(DeviceKind::MiniVna, 180_000_000, 1, 1), 180_000_000);
+        }
+
+        #[test]
+        fn the_reference_is_stored_and_used() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("calibration.toml");
+            let mut s = nwt();
+            assert!(!s.nwt_calibrated());
+            s.store_nwt_reference(vec![612; 1000], &path).unwrap();
+            assert!(s.nwt_calibrated());
+            assert_eq!(Calibration::load(&path).unwrap().nwt_reference, Some(vec![612; 1000]));
+            assert!(s.store_nwt_reference(vec![1; 3], &path).is_err());
+        }
+
+        #[test]
+        fn a_sweep_file_from_the_other_device_is_not_opened() {
+            let mut s = nwt();
+            s.on_event(Event::Sweep(nwt_result()));
+            let mut file = s.to_sweep_file().unwrap();
+            assert_eq!((file.request.kind, file.db_per_count), (DeviceKind::Nwt, 0.125));
+            file.view.m1 = Some(2);
+            assert!(s.load_sweep_file(file.clone()));
+            assert_eq!(s.result.as_ref().unwrap().db_per_count, 0.125);
+            assert!((s.points()[1].rl_db - 12.5).abs() < 1e-9);
+
+            let mut other = state();
+            let before = other.start_hz;
+            assert!(!other.load_sweep_file(file));
+            assert!(other.result.is_none() && other.start_hz == before);
+            assert!(other.status.contains("NWT"), "{}", other.status);
+        }
+
+        #[test]
+        fn starting_with_the_nwt_sweeper_saved_gives_a_usable_state() {
+            // Settings as saved by an earlier run: the device, but a miniVNA range and mode.
+            let settings = Settings { device: DeviceKind::Nwt, last_mode: "antenna".into(), ..Settings::default() };
+            let s = AppState::new(settings, Calibration::default());
+            assert_eq!(s.mode, UiMode::Transmission);
+            assert_eq!((s.start_hz, s.stop_hz), (35_000_000, 4_400_000_000));
+            assert_eq!((s.start_text.as_str(), s.stop_text.as_str()), ("35", "4400"));
+            assert_eq!(s.request().validate(), Ok(()));
+            assert!(s.scale_60db && s.show[2]);
+            // A saved range it can make is kept.
+            let settings = Settings { device: DeviceKind::Nwt, start_mhz: 430.0, stop_mhz: 440.0, ..Settings::default() };
+            let s = AppState::new(settings, Calibration::default());
+            assert_eq!((s.start_hz, s.stop_hz), (430_000_000, 440_000_000));
+        }
+
+        #[test]
+        fn the_graph_has_no_swr_or_ohms_scale_for_the_sweeper() {
+            use crate::ui::plot::{build, Prim};
+            let mut s = nwt();
+            s.settings.line_50_ohms = true;
+            s.on_event(Event::Sweep(nwt_result()));
+            let colors = s.settings.screen.clone();
+            let prims = build(&s, &colors, 800.0, 500.0);
+            let texts: Vec<&str> = prims.iter().filter_map(|p| if let Prim::Text { text, .. } = p { Some(text.as_str()) } else { None }).collect();
+            assert!(!texts.contains(&"50 ohms") && !texts.contains(&"1.5"), "{texts:?}");
+            assert!(texts.contains(&"T.L.") && texts.contains(&"0dB") && texts.contains(&"60"), "{texts:?}");
+            let swr_coloured = prims.iter().any(|p| matches!(p, Prim::Line { color, .. } | Prim::Text { color, .. } if *color == colors.swr));
+            assert!(!swr_coloured);
+            // The miniVNA keeps both.
+            let texts_vna = build(&swept(), &colors, 800.0, 500.0);
+            assert!(texts_vna.iter().any(|p| matches!(p, Prim::Text { text, .. } if text == "1.5")));
+        }
+
+        fn nwt_result() -> SweepResult {
+            let request = SweepRequest {
+                kind: DeviceKind::Nwt,
+                mode: Mode::Transmission,
+                start_hz: 400_000_000,
+                stop_hz: 500_000_000,
+                samples: 10,
+                extender: 1,
+                dds_factor: 1.0,
+                step_bug: false,
+            };
+            let raw: Vec<RawPoint> = (0..11u16).map(|i| RawPoint { phase: 0, level: 600u16.saturating_sub(100 * i) }).collect();
+            build_result(request, raw, vec![600; 11], false, 0.125)
+        }
+
+        #[test]
+        fn read_outs_of_what_the_sweeper_cannot_measure_are_empty() {
+            let mut s = nwt();
+            s.on_event(Event::Sweep(nwt_result()));
+            let p = s.points()[3];
+            assert_eq!(field(p.rl_db), "37.50");
+            assert_eq!(field(p.swr), "");
+            assert_eq!(field(p.rs), "");
+        }
     }
 }

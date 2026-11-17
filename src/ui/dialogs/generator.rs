@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use crate::sweep::Command;
-use crate::ui::state::{generator_freq_step, AppState, UiMode};
+use crate::ui::state::{generator_freq_step_for, AppState};
 use crate::ui::text::t;
 use crate::ui::Action;
 
@@ -29,16 +29,21 @@ impl Default for GeneratorDialog {
 impl GeneratorDialog {
     pub fn open(&mut self, state: &AppState, actions: &mut Vec<Action>) {
         self.open = true;
-        self.freq_hz = generator_freq_step(self.freq_hz, 0, state.extender);
+        self.freq_hz = generator_freq_step_for(state.device(), self.freq_hz, 0, state.extender);
         self.send(state, actions);
     }
 
     fn send(&self, state: &AppState, actions: &mut Vec<Action>) {
         actions.push(Action::Send(Command::Generator {
+            kind: state.settings.device,
             freq_hz: self.freq_hz,
             extender: state.extender,
             dds_factor: state.settings.dds_factor,
         }));
+    }
+
+    pub fn freq_hz(&self) -> u64 {
+        self.freq_hz
     }
 
     pub fn show(&mut self, ctx: &egui::Context, state: &AppState, actions: &mut Vec<Action>) {
@@ -69,7 +74,7 @@ impl GeneratorDialog {
                 ui.end_row();
             });
             if delta != 0 {
-                self.freq_hz = generator_freq_step(self.freq_hz, delta, state.extender);
+                self.freq_hz = generator_freq_step_for(state.device(), self.freq_hz, delta, state.extender);
                 self.send(state, actions);
             }
             ui.label(format!("{:.6} MHz", self.freq_hz as f64 / 1e6));
@@ -78,7 +83,7 @@ impl GeneratorDialog {
         if close {
             self.open = false;
             actions.push(Action::Send(Command::Park));
-            actions.push(Action::SetMode(UiMode::Antenna));
+            actions.push(Action::SetMode(state.idle_mode()));
         }
     }
 }

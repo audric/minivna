@@ -1,11 +1,13 @@
 //! The sweep command and its reply, as plain data. No input or output happens here.
 
-use super::{Mode, F_MAX_HZ, F_MIN_HZ};
+use super::{DeviceKind, Mode};
 use crate::calc::RawPoint;
 
 /// Everything that defines one sweep. Frequencies are as displayed, extender included.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SweepRequest {
+    /// Which instrument the sweep is for.
+    pub kind: DeviceKind,
     pub mode: Mode,
     pub start_hz: u64,
     pub stop_hz: u64,
@@ -42,8 +44,11 @@ impl SweepRequest {
         if ![1, 4, 8, 16].contains(&self.extender) {
             return Err(RequestError::Range);
         }
-        let low = F_MIN_HZ as u64 * self.extender as u64;
-        let high = F_MAX_HZ as u64 * self.extender as u64;
+        let (low, high) = self.kind.range_hz();
+        let (low, high) = (low * self.extender as u64, high * self.extender as u64);
+        if self.kind == DeviceKind::Nwt && (self.extender != 1 || self.mode != Mode::Transmission) {
+            return Err(RequestError::Range);
+        }
         if self.start_hz < low || self.stop_hz > high || self.start_hz >= self.stop_hz {
             return Err(RequestError::Range);
         }
@@ -59,7 +64,20 @@ impl SweepRequest {
     /// Whole Hz between points, as displayed.
     pub fn step_hz(&self) -> u64 {
         let span = self.stop_hz.saturating_sub(self.start_hz) as f64;
-        (span / self.samples.max(1) as f64).round_ties_even() as u64
+        let step = span / self.samples.max(1) as f64;
+        match self.kind {
+            DeviceKind::MiniVna => step.round_ties_even() as u64,
+            // This one counts in tens of Hz and cannot take large steps in one go.
+            DeviceKind::Nwt => super::nwt::device_step_hz(self) * super::nwt::thinning(self),
+        }
+    }
+
+    /// The first frequency actually swept.
+    fn first_hz(&self) -> u64 {
+        match self.kind {
+            DeviceKind::MiniVna => self.start_hz,
+            DeviceKind::Nwt => self.start_hz / 10 * 10,
+        }
     }
 
     /// True when the sweep starts one step low so that the bad first point can be dropped.
@@ -103,7 +121,7 @@ impl SweepRequest {
     /// Displayed frequency of points 0..=samples.
     pub fn freqs_hz(&self) -> Vec<f64> {
         let step = self.step_hz();
-        (0..=self.samples as u64).map(|i| (self.start_hz + i * step) as f64).collect()
+        (0..=self.samples as u64).map(|i| (self.first_hz() + i * step) as f64).collect()
     }
 
     /// The frequencies the device itself produced: displayed frequency divided by the extender.
@@ -138,7 +156,7 @@ mod tests {
     use crate::device::DDS_FACTOR_DEFAULT;
 
     fn req(mode: Mode, start: u64, stop: u64, samples: u16) -> SweepRequest {
-        SweepRequest {
+        SweepRequest { kind: crate::device::DeviceKind::MiniVna,
             mode,
             start_hz: start,
             stop_hz: stop,

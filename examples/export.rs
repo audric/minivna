@@ -37,7 +37,7 @@ fn main() {
     state.big = None;
     state.settings.signed_phase = true;
     let r = state.result.take().unwrap();
-    state.result = Some(minivna::sweep::build_result(r.request, r.raw, r.cal, true));
+    state.result = Some(minivna::sweep::build_result(r.request, r.raw, r.cal, true, minivna::device::nwt::DB_PER_COUNT_DEFAULT));
     println!("{}", files::save_png(&state, &dir.join("sim-smith"), 900, 560).expect("write").display());
     let mut again = AppState::new(Settings::default(), Calibration::default());
     files::open_sweep(&mut again, &dir.join("sim.mvna")).expect("open");

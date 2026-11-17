@@ -291,4 +291,68 @@ mod app {
         wait(&mut app, "the table", |a| a.state.calibration.reflection.is_some());
         assert!(dir.path().join("calibration.toml").exists());
     }
+
+    #[test]
+    fn the_nwt_sweeper_is_chosen_calibrated_and_swept() {
+        use crate::device::DeviceKind;
+        let (mut app, dir) = app();
+        app.apply(Action::SetDevice(DeviceKind::Nwt));
+        assert_eq!(app.state.device(), DeviceKind::Nwt);
+
+        // Before the reference is measured, the loss is counted from a nominal reading.
+        app.apply(Action::Band(app.state.settings.bands.iter().position(|b| b.name == "70cm").unwrap()));
+        app.apply(Action::SweepOnce);
+        wait(&mut app, "a sweep", |a| a.state.result.is_some() && !a.state.busy);
+        let result = app.state.result.clone().unwrap();
+        assert_eq!((result.request.kind, result.points.len()), (DeviceKind::Nwt, app.state.samples as usize + 1));
+        assert!(result.cal.iter().all(|c| *c == crate::device::nwt::REFERENCE_DEFAULT));
+
+        // The reference comes from a sweep over the whole range and is kept in the file.
+        app.apply(Action::Open(crate::ui::Dialog::CalibrateNwt));
+        app.apply(Action::Send(crate::sweep::Command::CalibrateNwt));
+        wait(&mut app, "the reference", |a| a.state.nwt_calibrated() && !a.state.busy);
+        let stored = crate::cal::Calibration::load(&dir.path().join("calibration.toml")).unwrap();
+        assert_eq!(stored.nwt_reference, app.state.calibration.nwt_reference);
+
+        // The worker uses it from the next sweep on: the simulated filter is its own
+        // reference, so the loss is zero everywhere.
+        app.apply(Action::SweepOnce);
+        wait(&mut app, "a calibrated sweep", |a| !a.state.busy && a.state.result.as_ref().is_some_and(|r| r.cal[0] != crate::device::nwt::REFERENCE_DEFAULT));
+        let worst = app.state.points().iter().map(|p| p.rl_db.abs()).fold(0.0, f64::max);
+        assert!(worst < 2.7, "{worst}"); // the reference grid is 4.365 MHz wide, the filter drops 0.6 dB per MHz
+    }
+
+    #[test]
+    fn the_device_is_not_changed_under_a_running_sweep() {
+        use crate::device::DeviceKind;
+        let (mut app, _dir) = app();
+        app.apply(Action::SweepContinuous);
+        wait(&mut app, "busy", |a| a.state.busy);
+        app.apply(Action::SetDevice(DeviceKind::Nwt));
+        assert_eq!(app.state.device(), DeviceKind::MiniVna);
+        app.apply(Action::Stop);
+        wait(&mut app, "idle", |a| !a.state.busy);
+        app.apply(Action::SetDevice(DeviceKind::Nwt));
+        assert_eq!(app.state.device(), DeviceKind::Nwt);
+        // Things that belong to the miniVNA stay shut.
+        app.apply(Action::Open(crate::ui::Dialog::Dds));
+        app.apply(Action::Open(crate::ui::Dialog::Calibrate(crate::device::Mode::Reflection)));
+        app.apply(Action::SetMode(UiMode::Antenna));
+        assert!(!app.dialogs.dds.open && !app.dialogs.calibrate.is_open());
+        assert_eq!(app.state.mode, UiMode::Transmission);
+    }
+
+    #[test]
+    fn the_generator_drives_the_nwt_sweeper() {
+        use crate::device::DeviceKind;
+        let (mut app, _dir) = app();
+        app.apply(Action::SetDevice(DeviceKind::Nwt));
+        app.apply(Action::SetMode(UiMode::Generator));
+        assert!(app.dialogs.generator.open);
+        let freq = app.dialogs.generator.freq_hz();
+        assert!((35_000_000..=4_400_000_000).contains(&freq), "{freq}");
+        std::thread::sleep(Duration::from_millis(200));
+        app.pump();
+        assert!(!app.state.status.starts_with("!!!"), "{}", app.state.status);
+    }
 }
