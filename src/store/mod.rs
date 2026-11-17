@@ -2,7 +2,10 @@
 
 use std::path::PathBuf;
 
+pub mod csv;
+pub mod png;
 pub mod settings;
+pub mod sweep_file;
 
 pub use settings::{Band, Colors, Rgb, Settings, Velocity};
 
@@ -21,4 +24,12 @@ pub fn settings_path() -> PathBuf {
 
 pub fn calibration_path() -> PathBuf {
     config_dir().join("calibration.toml")
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum FileError {
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+    #[error("the file is not valid: {0}")]
+    Format(String),
 }
