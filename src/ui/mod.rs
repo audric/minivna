@@ -14,6 +14,7 @@ pub mod marker_panel;
 pub mod menu;
 pub mod plot;
 pub mod side_panel;
+pub mod smith;
 pub mod state;
 pub mod text;
 
@@ -101,9 +102,24 @@ impl App {
             Ok(cal) => (cal, None),
             Err(e) => (Calibration::default(), Some(e.to_string())),
         };
+        // A light window like the original's: entry and read-out fields are white boxes with
+        // a border, clearly apart from the grey panels. Not tied to the desktop's dark mode.
+        cc.egui_ctx.set_theme(egui::Theme::Light);
+        cc.egui_ctx.all_styles_mut(|style| {
+            let border = egui::Stroke::new(1.0, egui::Color32::from_gray(140));
+            style.visuals.widgets.inactive.bg_stroke = border;
+            style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(170));
+            style.visuals.extreme_bg_color = egui::Color32::WHITE;
+            style.visuals.panel_fill = egui::Color32::from_gray(228);
+            style.visuals.window_fill = egui::Color32::from_gray(236);
+        });
         let ctx = cc.egui_ctx.clone();
         let worker = sweep::spawn(port.clone(), calibration.clone(), Box::new(move || ctx.request_repaint()));
         let mut state = AppState::new(settings, calibration);
+        // `--smith` starts on the Smith chart.
+        if std::env::args().any(|a| a == "--smith") {
+            state.view = state::View::Smith;
+        }
         let _ = worker.tx.send(Command::SetSigned(state.settings.signed_phase));
         let uncalibrated = state.calibration.reflection.is_none().then(|| text::t("Please calibrate your miniVNA first (Configure menu).").to_string());
         state.status = notice.or(cal_notice).or(uncalibrated).unwrap_or_default();

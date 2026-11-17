@@ -3,7 +3,8 @@
 use eframe::egui;
 
 use super::plot::{self, Anchor, Prim};
-use super::state::{AppState, Marker};
+use super::smith;
+use super::state::{AppState, Marker, View};
 use super::{color32, Action};
 use crate::store::Rgb;
 
@@ -11,7 +12,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, _actions: &mut Vec<Action>)
     let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click());
     let origin = response.rect.min;
     state.graph_size = [response.rect.width().round() as u32, response.rect.height().round() as u32];
-    let prims = plot::build(state, &state.settings.screen, response.rect.width(), response.rect.height());
+    let prims = plot::build_view(state, &state.settings.screen, response.rect.width(), response.rect.height());
     paint(&painter, origin, &prims);
     clicks(ui, &response, state);
 }
@@ -28,6 +29,16 @@ fn clicks(ui: &egui::Ui, response: &egui::Response, state: &mut AppState) {
         return;
     }
     let Some(pos) = response.interact_pointer_pos() else { return };
+    if state.view == View::Smith {
+        // On the Smith chart a click takes the nearest point of the trace: left M1, right M2.
+        let (x, y) = (pos.x - response.rect.min.x, pos.y - response.rect.min.y);
+        let found = smith::nearest_index(state, response.rect.width(), response.rect.height(), x, y);
+        if let (Some(index), false) = (found, middle) {
+            let freq = state.points()[index].freq_hz;
+            state.place_marker(if left { Marker::M1 } else { Marker::M2 }, freq);
+        }
+        return;
+    }
     let frame = plot::Frame::new(response.rect.width(), response.rect.height());
     let (x, y) = (pos.x - response.rect.min.x, pos.y - response.rect.min.y);
     if !frame.contains(x, y) {
@@ -90,7 +101,7 @@ pub fn paint(painter: &egui::Painter, origin: egui::Pos2, prims: &[Prim]) {
 /// alpha), drawn with the PNG colour set. Needs no window.
 pub fn render_png(state: &AppState, width: u32, height: u32) -> Vec<u8> {
     let mut canvas = Canvas { width: width as i32, height: height as i32, pixels: vec![255; width as usize * height as usize * 4] };
-    for prim in plot::build(state, &state.settings.png, width as f32, height as f32) {
+    for prim in plot::build_view(state, &state.settings.png, width as f32, height as f32) {
         match prim {
             Prim::Fill { rect, color } => canvas.fill(rect, color),
             Prim::Line { points, color, width, dashed } => canvas.line(&points, color, width, dashed),

@@ -22,9 +22,19 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
     ui.add_space(2.0);
 }
 
+/// A read-out field: a framed box in the field colour, so it stands out from the panel.
 fn value(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let label = egui::Label::new(egui::RichText::new(text).monospace()).sense(egui::Sense::click());
-    ui.add_sized([FIELD_WIDTH, 18.0], label)
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(FIELD_WIDTH, 18.0), egui::Sense::click());
+    let visuals = ui.visuals();
+    ui.painter().rect(rect, 2.0, visuals.extreme_bg_color, visuals.widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
+    ui.painter().text(
+        rect.right_center() - egui::vec2(4.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        text,
+        egui::FontId::monospace(12.0),
+        visuals.strong_text_color(),
+    );
+    response
 }
 
 fn swatch(ui: &mut egui::Ui, color: egui::Color32) {

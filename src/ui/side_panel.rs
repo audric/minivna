@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use super::plot::{curve_color, curve_name};
-use super::state::{AppState, Curve};
+use super::state::{AppState, Curve, View};
 use super::text::t;
 use super::{color32, Action};
 
@@ -66,6 +66,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
     });
 
     ui.separator();
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut state.view, View::Graph, t("Curves"));
+        ui.radio_value(&mut state.view, View::Smith, t("Smith chart"));
+    });
     ui.label(t("Graphic :"));
     let colors = state.settings.screen.clone();
     for (i, curve) in Curve::ALL.into_iter().enumerate() {

@@ -32,6 +32,13 @@ fn main() {
     ] {
         println!("{}", written.expect("write").display());
     }
+    // The same sweep as a Smith chart, with the sign of the reactance estimated.
+    state.view = minivna::ui::state::View::Smith;
+    state.big = None;
+    state.settings.signed_phase = true;
+    let r = state.result.take().unwrap();
+    state.result = Some(minivna::sweep::build_result(r.request, r.raw, r.cal, true));
+    println!("{}", files::save_png(&state, &dir.join("sim-smith"), 900, 560).expect("write").display());
     let mut again = AppState::new(Settings::default(), Calibration::default());
     files::open_sweep(&mut again, &dir.join("sim.mvna")).expect("open");
     println!("reopened: {} points, markers {:?} {:?}, row {:?}", again.points().len(), again.m1, again.m2, again.marker_row(again.m1.unwrap()));

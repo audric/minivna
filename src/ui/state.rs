@@ -105,6 +105,7 @@ pub struct AppState {
     pub current_band: Option<usize>,
     /// A value being typed in the small entry window, and the text so far.
     pub entry: Option<(Entry, String)>,
+    pub view: View,
     /// Size of the graph on screen in pixels, for saving it as a picture.
     pub graph_size: [u32; 2],
     /// The row shown as a large banner on the graph (the original's "Visual" boxes).
@@ -149,6 +150,7 @@ impl AppState {
             entry: None,
             big: None,
             graph_size: [0, 0],
+            view: View::Graph,
             band_markers_pending: false,
             first_result_seen: false,
             auto_pass: 0,
@@ -269,6 +271,15 @@ impl AppState {
     pub fn step_text(&self) -> String {
         format!("(Step : {} Hz)", self.request().step_hz())
     }
+}
+
+/// What the central area shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum View {
+    /// Curves over frequency.
+    #[default]
+    Graph,
+    Smith,
 }
 
 /// Which read-out row is shown large on the graph.

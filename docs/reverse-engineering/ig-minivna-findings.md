@@ -1,6 +1,6 @@
 # IG_miniVNA: findings from reading the original exe
 
-Date: 2026-11-17. Produced by static reading of the UPX-unpacked `IG_miniVNA.exe` (version 2008, IW1GEU). Nothing was executed. Key constants (180/1023, 60/1023, 20.16, the N+2 count, the 0.0006-day timeout) were spot-checked a second time against the disassembly, and the level and phase formulas were checked against sweeps recorded from the real device (`docs/captures/`). The working files in the scratch directory named below are temporary and may no longer exist.
+Date: 2026-11-17. Produced by static reading of the UPX-unpacked `IG_miniVNA.exe` (version 2008, by F4CLB Jean-Louis). Nothing was executed. Key constants (180/1023, 60/1023, 20.16, the N+2 count, the 0.0006-day timeout) were spot-checked a second time against the disassembly, and the level and phase formulas were checked against sweeps recorded from the real device (`docs/captures/`). The working files in the scratch directory named below are temporary and may no longer exist.
 
 IG_miniVNA static analysis report (unpacked.exe, image base 0x400000)
 

@@ -11,7 +11,7 @@ Companion documents:
 
 ## Intent
 
-IG_miniVNA is a 2008 Windows freeware program by IW1GEU (Jean-Louis) for the mRS miniVNA antenna analyser. Its Delphi source code was lost. The user runs it under CrossOver/Wine on Linux. The only existing rewrite is in Java, which the user does not want.
+IG_miniVNA is a 2008 Windows freeware program by F4CLB (Jean-Louis) for the mRS miniVNA antenna analyser. Its Delphi source code was lost. The user runs it under CrossOver/Wine on Linux. The only existing rewrite is in Java, which the user does not want.
 
 The user wants a native replacement whose source they own, so that they can modify and expand it. A Smith chart is one expansion they have in mind.
 

@@ -191,6 +191,6 @@ pub fn about(ctx: &egui::Context, open: &mut bool) {
     egui::Window::new(t("About")).open(open).collapsible(false).resizable(false).show(ctx, |ui| {
         ui.heading(format!("minivna {}", env!("CARGO_PKG_VERSION")));
         ui.label(t("For the mRS miniVNA antenna analyser."));
-        ui.label(t("A rewrite of IG_miniVNA by IW1GEU (Jean-Louis), whose measurement methods it follows."));
+        ui.label(t("A rewrite by IW1GEU (Audric) of IG_miniVNA by F4CLB (Jean-Louis), whose measurement methods it follows."));
     });
 }

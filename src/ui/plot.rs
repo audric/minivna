@@ -1,7 +1,7 @@
 //! The graph as a list of simple shapes, with no dependency on the window toolkit.
 //! The screen and the PNG export both draw from this list.
 
-use super::state::{AppState, Big, Curve};
+use super::state::{AppState, Big, Curve, View};
 use crate::calc::Point;
 use crate::store::{Colors, Rgb};
 
@@ -136,6 +136,14 @@ const LOSS_TICKS_60: [f64; 6] = [0.0, 6.0, 12.0, 20.0, 40.0, 60.0];
 const FREQ_DIVISIONS: usize = 6;
 
 /// The whole graph for a picture of `width` x `height` pixels.
+/// The drawing of whichever view is chosen: the curves over frequency or the Smith chart.
+pub fn build_view(state: &AppState, colors: &Colors, width: f32, height: f32) -> Vec<Prim> {
+    match state.view {
+        View::Graph => build(state, colors, width, height),
+        View::Smith => super::smith::build(state, colors, width, height),
+    }
+}
+
 pub fn build(state: &AppState, colors: &Colors, width: f32, height_px: f32) -> Vec<Prim> {
     let mut out = Vec::new();
     let frame = Frame::new(width, height_px);
