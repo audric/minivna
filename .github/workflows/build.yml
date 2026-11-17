@@ -11,15 +11,30 @@ on:
 jobs:
   linux:
     # An older system on purpose: the binary then also starts on older distributions.
-    runs-on: ubuntu-22.04
+    # aarch64 is for the Raspberry Pi 3, 4 and 5 with a 64-bit system.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+      - name: Rust, if the runner has none
+        run: |
+          if ! command -v cargo >/dev/null; then
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
       - run: cargo test
       - name: Get appimagetool
         run: |
           mkdir -p "$HOME/bin"
-          curl -fsSL -o "$HOME/bin/appimagetool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          curl -fsSL -o "$HOME/bin/appimagetool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${{ matrix.arch }}.AppImage
           chmod +x "$HOME/bin/appimagetool"
           echo "$HOME/bin" >> "$GITHUB_PATH"
       - name: AppImage
@@ -28,13 +43,13 @@ jobs:
       - name: Plain archive (binary, icon, desktop entry, README)
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          dir=minivna-$version-linux-x86_64
+          dir=minivna-$version-linux-${{ matrix.arch }}
           mkdir "$dir"
           cp target/release/minivna packaging/minivna.desktop packaging/minivna.png README.md "$dir/"
           tar czf "dist/$dir.tar.gz" "$dir"
       - uses: actions/upload-artifact@v7
         with:
-          name: minivna-linux-x86_64
+          name: minivna-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
 
