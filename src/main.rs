@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use minivna::device::find_minivna;
 use minivna::store::{self, Settings};
 use minivna::sweep::PortChoice;

@@ -267,8 +267,7 @@ mod tests {
     fn save_then_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
-        let mut s = Settings::default();
-        s.port = Some("/dev/ttyUSB0".into());
+        let mut s = Settings { port: Some("/dev/ttyUSB0".into()), ..Default::default() };
         s.screen.swr = Rgb(1, 2, 3);
         s.bands[0].stop_mhz = 2.5;
         s.window = Some([10.0, 20.0, 900.0, 600.0]);

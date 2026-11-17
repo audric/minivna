@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+      - run: cargo test
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minivna-linux-x86_64
+          path: target/release/minivna
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minivna-windows-x86_64
+          path: target/release/minivna.exe
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test
+      - run: cargo build --release
+      - name: Wrap in an unsigned .app inside a .dmg
+        run: |
+          app=dist/minivna.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/minivna "$app/Contents/MacOS/"
+          cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>minivna</string>
+            <key>CFBundleExecutable</key><string>minivna</string>
+            <key>CFBundleIdentifier</key><string>org.minivna.minivna</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.1.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          hdiutil create -volname minivna -srcfolder dist -ov -format UDZO minivna-macos.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minivna-macos
+          path: minivna-macos.dmg

@@ -29,7 +29,7 @@ pub fn min_rl_index(points: &[Point]) -> Option<usize> {
 fn extreme_rl(points: &[Point], better: impl Fn(f64, f64) -> bool) -> Option<usize> {
     let mut found: Option<usize> = None;
     for (i, p) in points.iter().enumerate().skip(1) {
-        if found.map_or(true, |best| better(p.rl_db, points[best].rl_db)) {
+        if found.is_none_or(|best| better(p.rl_db, points[best].rl_db)) {
             found = Some(i);
         }
     }

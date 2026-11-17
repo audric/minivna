@@ -115,7 +115,9 @@ impl SweepRequest {
 /// 4 bytes per point: phase then level, each low byte first. Trailing partial points are ignored.
 pub fn parse_points(bytes: &[u8]) -> Vec<RawPoint> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| RawPoint { phase: u16::from_le_bytes([c[0], c[1]]), level: u16::from_le_bytes([c[2], c[3]]) })
         .collect()
 }

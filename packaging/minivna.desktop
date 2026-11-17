@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=minivna
+Comment=Antenna analyser program for the mRS miniVNA
+Exec=minivna
+Icon=minivna
+Categories=HamRadio;Science;Electronics;
+Terminal=false
