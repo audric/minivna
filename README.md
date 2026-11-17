@@ -10,6 +10,10 @@ measurement methods and numbers follow that program. The miniVNA Pro is not supp
 
 *The main window, here with the built-in simulated device (`minivna --sim`).*
 
+![The Smith chart view of the same sweep, with marker 1](images/screenshot-smith.png)
+
+*The same sweep as a Smith chart, with "Estimate sign of phase and Xs" switched on.*
+
 What it does: SWR, |Z|, return loss, phase, Rs and |Xs| curves with two markers, a Smith
 chart view of the same sweep, bandwidth
 and Q, cable loss, cable length (with an automatic search), transmission loss, a signal

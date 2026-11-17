@@ -1,7 +1,11 @@
 name: build
 
+# Every push and pull request: test and build the packages, kept as workflow artifacts.
+# A tag such as v0.1.0: the same, and the packages are attached to a GitHub release.
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -12,11 +16,27 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
       - run: cargo test
-      - run: cargo build --release
+      - name: Get appimagetool
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL -o "$HOME/bin/appimagetool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$HOME/bin/appimagetool"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - name: AppImage
+        # The runner has no FUSE: appimagetool unpacks itself instead of mounting.
+        run: APPIMAGE_EXTRACT_AND_RUN=1 packaging/build-linux.sh
+      - name: Plain archive (binary, icon, desktop entry, README)
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          dir=minivna-$version-linux-x86_64
+          mkdir "$dir"
+          cp target/release/minivna packaging/minivna.desktop packaging/minivna.png README.md "$dir/"
+          tar czf "dist/$dir.tar.gz" "$dir"
       - uses: actions/upload-artifact@v4
         with:
           name: minivna-linux-x86_64
-          path: target/release/minivna
+          path: dist/*
+          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
@@ -24,12 +44,20 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo test
       - run: cargo build --release
+      - name: Zip the program with the README
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/release/minivna.exe, README.md -DestinationPath "dist/minivna-$version-windows-x86_64.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: minivna-windows-x86_64
-          path: target/release/minivna.exe
+          path: dist/*
+          if-no-files-found: error
 
   macos:
+    # Apple silicon. Unsigned: on first start, right-click the program and choose Open.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,10 +65,11 @@ jobs:
       - run: cargo build --release
       - name: Wrap in an unsigned .app inside a .dmg
         run: |
-          app=dist/minivna.app
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          app=bundle/minivna.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" dist
           cp target/release/minivna "$app/Contents/MacOS/"
-          cat > "$app/Contents/Info.plist" <<'PLIST'
+          cat > "$app/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
@@ -48,12 +77,33 @@ jobs:
             <key>CFBundleExecutable</key><string>minivna</string>
             <key>CFBundleIdentifier</key><string>org.minivna.minivna</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>0.1.0</string>
+            <key>CFBundleShortVersionString</key><string>$version</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           PLIST
-          hdiutil create -volname minivna -srcfolder dist -ov -format UDZO minivna-macos.dmg
+          hdiutil create -volname minivna -srcfolder bundle -ov -format UDZO "dist/minivna-$version-macos-arm64.dmg"
       - uses: actions/upload-artifact@v4
         with:
-          name: minivna-macos
-          path: minivna-macos.dmg
+          name: minivna-macos-arm64
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # Only for version tags: collect the packages of the three jobs into a release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la packages
+          gh release create "$GITHUB_REF_NAME" packages/* \
+            --repo "$GITHUB_REPOSITORY" --title "minivna $GITHUB_REF_NAME" --generate-notes
