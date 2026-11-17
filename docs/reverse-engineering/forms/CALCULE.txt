@@ -1,0 +1,75 @@
+object FormCalcule: TFormCalcule
+  Left = 260
+  Top = 236
+  BorderStyle = 'bsToolWindow'
+  Caption = ' IG miniVNA'
+  ClientHeight = 105
+  ClientWidth = 284
+  DefaultMonitor = 'dmMainForm'
+  FormStyle = 'fsStayOnTop'
+  Position = 'poDefault'
+  Visible = True
+  OnShow = 'FormShow'
+  object Label2: TLabel
+    Left = 25
+    Top = 45
+    Width = 12
+    Height = 13
+    Caption = 'L :'
+  object LabelFrM1: TLabel
+    Left = 24
+    Top = 15
+    Width = 50
+    Height = 13
+    Caption = 'LabelFrM1'
+  object EditLCconnus: TEdit
+    Left = 48
+    Top = 41
+    Width = 41
+    Height = 21
+    MaxLength = 5
+    Text = '15'
+  object ComboBoxLC: TComboBox
+    Left = 101
+    Top = 42
+    Width = 49
+    Height = 21
+    ItemHeight = 13
+    Items.Strings = ['µH', 'pF']
+    Text = 'µH'
+  object BpEgale: TBitBtn
+    Left = 24
+    Top = 71
+    Width = 30
+    Height = 25
+    Caption = '='
+    OnClick = 'BpEgaleClick'
+    Margin = 5
+  object EditLcResult: TEdit
+    Left = 69
+    Top = 73
+    Width = 81
+    Height = 21
+    Text = 'EditLCresult'
+    OnKeyPress = 'EditLcResultKeyPress'
+  object BpM1Swr: TButton
+    Left = 168
+    Top = 8
+    Width = 105
+    Height = 25
+    Caption = 'M1 = Swr Mini'
+    OnClick = 'BpM1SwrClick'
+  object BpM1dBMax: TButton
+    Left = 168
+    Top = 40
+    Width = 105
+    Height = 25
+    Caption = 'M1 = dB Maxi'
+    OnClick = 'BpM1dBMaxClick'
+  object BpM1dBmin: TButton
+    Left = 168
+    Top = 72
+    Width = 105
+    Height = 25
+    Caption = 'M1 = dB Mini'
+    OnClick = 'BpM1dBminClick'
