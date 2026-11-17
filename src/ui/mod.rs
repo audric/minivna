@@ -3,9 +3,11 @@
 use eframe::egui;
 
 use crate::cal::Calibration;
+use crate::device::Mode;
 use crate::store::{self, Rgb, Settings};
 use crate::sweep::{self, Command, PortChoice, Worker};
 
+pub mod dialogs;
 pub mod graph;
 pub mod marker_panel;
 pub mod menu;
@@ -16,8 +18,7 @@ pub mod text;
 
 use state::{AppState, AutoLength, UiMode};
 
-/// Something the user asked for that needs the sweep worker.
-#[derive(Clone, Debug, PartialEq)]
+/// Something the user asked for that the window has to carry out.
 pub enum Action {
     SweepOnce,
     SweepContinuous,
@@ -36,6 +37,9 @@ pub enum Action {
     /// Start the automatic cable-length search.
     AutoLength,
     Open(Dialog),
+    /// Pass a command straight to the sweep worker.
+    Send(Command),
+    SetPort(PortChoice),
     Quit,
 }
 
@@ -44,10 +48,22 @@ pub enum Action {
 pub enum Dialog {
     About,
     Velocity,
+    Port,
+    Calibrate(Mode),
+    Dds,
 }
 
 pub fn color32(c: Rgb) -> egui::Color32 {
     egui::Color32::from_rgb(c.0, c.1, c.2)
+}
+
+/// Add advice to an error where there is something the user can do about it.
+fn explain(why: String) -> String {
+    if why.starts_with("no permission") {
+        format!("{why}. {}", text::t("On Linux, add your user to the 'dialout' group and log in again."))
+    } else {
+        why
+    }
 }
 
 pub struct App {
@@ -59,6 +75,7 @@ pub struct App {
     about_open: bool,
     title: String,
     quit: bool,
+    dialogs: dialogs::Dialogs,
 }
 
 impl App {
@@ -71,8 +88,9 @@ impl App {
         let worker = sweep::spawn(port.clone(), calibration.clone(), Box::new(move || ctx.request_repaint()));
         let mut state = AppState::new(settings, calibration);
         let _ = worker.tx.send(Command::SetSigned(state.settings.signed_phase));
-        state.status = notice.or(cal_notice).unwrap_or_default();
-        App { state, worker, port, sweep_at_start, about_open: false, title: String::new(), quit: false }
+        let uncalibrated = state.calibration.reflection.is_none().then(|| text::t("Please calibrate your miniVNA first (Configure menu).").to_string());
+        state.status = notice.or(cal_notice).or(uncalibrated).unwrap_or_default();
+        App { state, worker, port, sweep_at_start, about_open: false, title: String::new(), quit: false, dialogs: Default::default() }
     }
 
     fn send(&self, command: Command) {
@@ -109,7 +127,14 @@ impl App {
                     self.apply(Action::SweepOnce);
                 }
             }
-            Action::SetMode(mode) => self.state.set_mode(mode),
+            Action::SetMode(mode) => {
+                self.state.set_mode(mode);
+                if mode == UiMode::Generator && !self.state.busy {
+                    let mut more = Vec::new();
+                    self.dialogs.generator.open(&self.state, &mut more);
+                    more.into_iter().for_each(|a| self.apply(a));
+                }
+            }
             Action::Band(index) => {
                 if self.state.apply_band(index) {
                     self.apply(Action::SweepOnce);
@@ -139,6 +164,24 @@ impl App {
             }
             Action::Open(Dialog::About) => self.about_open = true,
             Action::Open(Dialog::Velocity) => {}
+            Action::Open(Dialog::Port) => self.dialogs.port.open(),
+            Action::Open(Dialog::Calibrate(mode)) => self.dialogs.calibrate.open(mode),
+            Action::Open(Dialog::Dds) => {
+                if !self.state.busy {
+                    let mut more = Vec::new();
+                    self.dialogs.dds.open(&self.state, &mut more);
+                    more.into_iter().for_each(|a| self.apply(a));
+                }
+            }
+            Action::Send(command) => self.send(command),
+            Action::SetPort(port) => {
+                self.state.settings.port = match &port {
+                    PortChoice::Serial(name) => Some(name.clone()),
+                    PortChoice::Simulated => None,
+                };
+                self.send(Command::SetPort(port.clone()));
+                self.port = port;
+            }
             Action::Quit => self.quit = true,
         }
     }
@@ -176,6 +219,19 @@ impl eframe::App for App {
         while let Ok(event) = self.worker.rx.try_recv() {
             let is_sweep = matches!(event, sweep::Event::Sweep(_));
             let failed = matches!(event, sweep::Event::Error(_));
+            let event = match event {
+                sweep::Event::CalTable(mode, table) => {
+                    let stored = self.state.store_cal_table(mode, table, &store::calibration_path());
+                    self.send(Command::SetCalibration(self.state.calibration.clone()));
+                    self.dialogs.calibrate.finished(stored.map_err(|e| e.to_string()));
+                    continue;
+                }
+                sweep::Event::Error(why) => {
+                    self.dialogs.calibrate.finished(Err(why.clone()));
+                    sweep::Event::Error(explain(why))
+                }
+                other => other,
+            };
             self.state.on_event(event);
             if self.state.auto_length_running() && (is_sweep || failed) {
                 match self.state.auto_length_on_result() {
@@ -219,6 +275,10 @@ impl eframe::App for App {
 
         marker_panel::entry_dialog(ui.ctx(), &mut self.state);
         menu::about(ui.ctx(), &mut self.about_open);
+        self.dialogs.port.show(ui.ctx(), &self.state, &self.port, &mut actions);
+        self.dialogs.calibrate.show(ui.ctx(), &self.state, &mut actions);
+        self.dialogs.dds.show(ui.ctx(), &mut self.state, &mut actions);
+        self.dialogs.generator.show(ui.ctx(), &self.state, &mut actions);
         menu::shortcuts(ui, &self.state, &mut actions);
         self.keys(ui, &mut actions);
 

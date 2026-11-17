@@ -1,7 +1,9 @@
 //! Everything the window knows and every decision it makes, with no drawing code.
 //! The drawing modules only read this state and call these methods.
 
-use crate::cal::Calibration;
+use std::path::Path;
+
+use crate::cal::{CalError, Calibration, CAL_POINTS};
 use crate::calc::tools::{
     bandwidth_q, cable_length_m, cable_loss, quarter_wave_crossings, refine_to_90, swr_min_index, velocity_from_length,
 };
@@ -547,6 +549,32 @@ impl AppState {
     }
 }
 
+/// Adjust the trial Hz-to-device factor of the DDS calibration, within sane limits.
+pub fn nudge_dds(trial: f64, step: f64) -> f64 {
+    (trial + step).clamp(10.0, 11.5)
+}
+
+/// Change the generator frequency by `delta` Hz, staying within what the device can do.
+pub fn generator_freq_step(freq_hz: u64, delta: i64, extender: u8) -> u64 {
+    let mult = extender.max(1) as i64;
+    let (low, high) = (F_MIN_HZ as i64 * mult, F_MAX_HZ as i64 * mult);
+    (freq_hz as i64 + delta).clamp(low, high) as u64
+}
+
+impl AppState {
+    /// Keep a freshly measured calibration table and write the calibration file.
+    pub fn store_cal_table(&mut self, mode: Mode, table: Vec<i16>, path: &Path) -> Result<(), CalError> {
+        if table.len() != CAL_POINTS {
+            return Err(CalError::Format(format!("{} entries, expected {CAL_POINTS}", table.len())));
+        }
+        match mode {
+            Mode::Reflection => self.calibration.reflection = Some(table),
+            Mode::Transmission => self.calibration.transmission = Some(table),
+        }
+        self.calibration.save(path)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -961,5 +989,40 @@ pub(crate) mod tests {
         assert!(matches!(s.auto_length_on_result(), AutoLength::Failed));
         assert!(!s.auto_length_running());
         assert!(matches!(s.auto_length_on_result(), AutoLength::Failed));
+    }
+
+    // ---- device dialogs (Task 12) ----
+
+    #[test]
+    fn nudge_dds_stays_in_range() {
+        assert!((nudge_dds(10.73741824, 0.001) - 10.73841824).abs() < 1e-12);
+        assert!((nudge_dds(10.73741824, -0.000001) - 10.73741724).abs() < 1e-12);
+        assert_eq!(nudge_dds(11.4999, 0.001), 11.5);
+        assert_eq!(nudge_dds(10.0005, -0.001), 10.0);
+    }
+
+    #[test]
+    fn generator_step_clamps() {
+        assert_eq!(generator_freq_step(10_000_000, 1_000_000, 1), 11_000_000);
+        assert_eq!(generator_freq_step(100_000, -1_000_000, 1), 100_000);
+        assert_eq!(generator_freq_step(180_000_000, 1, 1), 180_000_000);
+        assert_eq!(generator_freq_step(500_000, -1_000_000, 4), 400_000);
+        assert_eq!(generator_freq_step(719_999_999, 10, 4), 720_000_000);
+    }
+
+    #[test]
+    fn storing_a_table_marks_it_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("calibration.toml");
+        let mut s = state();
+        assert!(s.calibration.reflection.is_none());
+        s.store_cal_table(Mode::Reflection, vec![-20; 1000], &path).unwrap();
+        assert_eq!(s.calibration.reflection.as_deref(), Some(&[-20i16; 1000][..]));
+        assert!(s.calibration.transmission.is_none());
+        assert_eq!(Calibration::load(&path).unwrap(), s.calibration);
+        s.store_cal_table(Mode::Transmission, vec![5; 1000], &path).unwrap();
+        assert_eq!(Calibration::load(&path).unwrap(), s.calibration);
+        assert!(s.store_cal_table(Mode::Reflection, vec![1; 7], &path).is_err());
+        assert_eq!(s.calibration.reflection.as_deref(), Some(&[-20i16; 1000][..]));
     }
 }

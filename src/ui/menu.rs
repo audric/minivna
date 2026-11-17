@@ -3,6 +3,7 @@
 use eframe::egui;
 
 use super::state::{AppState, UiMode};
+use crate::device::Mode;
 use super::text::t;
 use super::{Action, Dialog};
 
@@ -107,6 +108,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
         });
 
         ui.menu_button(t("Configure"), |ui| {
+            for (name, dialog) in [
+                (t("Com Port"), Dialog::Port),
+                (t("Calibrate DDS frequency"), Dialog::Dds),
+                (t("Calibrate Reflection"), Dialog::Calibrate(Mode::Reflection)),
+                (t("Calibrate Transmission"), Dialog::Calibrate(Mode::Transmission)),
+            ] {
+                if item(ui, name, "") {
+                    actions.push(Action::Open(dialog));
+                }
+            }
+            ui.separator();
             ui.checkbox(&mut state.settings.step_bug, t("Compensate for firmware Step bug"));
             if ui.checkbox(&mut state.settings.extender_menu, t("Enable menu of Frequency Extender")).changed()
                 && !state.settings.extender_menu
