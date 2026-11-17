@@ -20,6 +20,9 @@ pub struct SimTransport {
     pub written: Vec<u8>,
     pub(crate) command: Vec<u8>,
     pub(crate) reply: VecDeque<u8>,
+    /// How long a real device would take to answer a command; zero in tests.
+    pub pace: Duration,
+    pub(crate) ready_at: Option<std::time::Instant>,
 }
 
 impl SimTransport {
@@ -30,6 +33,8 @@ impl SimTransport {
             written: Vec::new(),
             command: Vec::new(),
             reply: VecDeque::new(),
+            pace: Duration::ZERO,
+            ready_at: None,
         }
     }
 
@@ -95,11 +100,21 @@ impl Transport for SimTransport {
                 self.command.drain(..=end);
             }
             self.run_command(numbers);
+            self.ready_at = (!self.pace.is_zero()).then(|| std::time::Instant::now() + self.pace);
         }
         Ok(())
     }
 
-    fn read(&mut self, buf: &mut [u8], _timeout: Duration) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> std::io::Result<usize> {
+        if let Some(ready_at) = self.ready_at {
+            let wait = ready_at.saturating_duration_since(std::time::Instant::now());
+            if wait > timeout {
+                std::thread::sleep(timeout);
+                return Ok(0);
+            }
+            std::thread::sleep(wait);
+            self.ready_at = None;
+        }
         let n = buf.len().min(self.reply.len());
         for (slot, byte) in buf.iter_mut().zip(self.reply.drain(..n)) {
             *slot = byte;

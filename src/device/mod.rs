@@ -38,6 +38,8 @@ pub enum DeviceError {
     Io(String),
     #[error("{0}")]
     Request(#[from] RequestError),
+    #[error("the sweep was stopped")]
+    Cancelled,
 }
 
 impl From<std::io::Error> for DeviceError {
@@ -86,6 +88,17 @@ impl<T: Transport> Device<T> {
         req: &SweepRequest,
         on_progress: &mut dyn FnMut(f32),
     ) -> Result<Vec<RawPoint>, DeviceError> {
+        self.sweep_with_cancel(req, on_progress, &|| false)
+    }
+
+    /// Like `sweep`, but gives up with `Cancelled` as soon as `cancelled` says so
+    /// (asked about ten times a second while waiting for the reply).
+    pub fn sweep_with_cancel(
+        &mut self,
+        req: &SweepRequest,
+        on_progress: &mut dyn FnMut(f32),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<RawPoint>, DeviceError> {
         req.validate()?;
         let parts = req.command_parts();
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
@@ -93,7 +106,7 @@ impl<T: Transport> Device<T> {
         let mut got = 0;
         for _attempt in 0..2 {
             self.send(&parts)?;
-            let reply = self.read_reply(wanted, on_progress)?;
+            let reply = self.read_reply(wanted, on_progress, cancelled)?;
             if reply.len() == wanted {
                 return Ok(req.parse_reply(&reply));
             }
@@ -102,11 +115,40 @@ impl<T: Transport> Device<T> {
         Err(DeviceError::Timeout { got, wanted })
     }
 
-    fn read_reply(&mut self, wanted: usize, on_progress: &mut dyn FnMut(f32)) -> Result<Vec<u8>, DeviceError> {
+    /// After a cancelled sweep: the miniVNA cannot be interrupted and goes on sending the
+    /// rest of its reply. Read that away (up to `remaining` bytes, or until it has been
+    /// quiet for a while), so that it is not taken for the answer to the next command.
+    fn drain(&mut self, mut remaining: usize) {
+        let quiet_limit = self.reply_timeout.min(Duration::from_millis(400));
+        let mut scratch = [0u8; 512];
+        let mut last_data = Instant::now();
+        while remaining > 0 && last_data.elapsed() < quiet_limit {
+            let want = remaining.min(scratch.len());
+            match self.transport.read(&mut scratch[..want], Duration::from_millis(50)) {
+                Ok(0) => {}
+                Ok(n) => {
+                    remaining -= n;
+                    last_data = Instant::now();
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn read_reply(
+        &mut self,
+        wanted: usize,
+        on_progress: &mut dyn FnMut(f32),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<u8>, DeviceError> {
         let mut reply = vec![0u8; wanted];
         let mut got = 0;
         let mut last_data = Instant::now();
         while got < wanted {
+            if cancelled() {
+                self.drain(wanted - got);
+                return Err(DeviceError::Cancelled);
+            }
             let wait = self.reply_timeout.min(Duration::from_millis(100));
             let n = self.transport.read(&mut reply[got..], wait)?;
             if n > 0 {
@@ -223,5 +265,17 @@ mod tests {
         let mut d = device(SimTransport::new());
         d.generator(10_000_000, 1, DDS_FACTOR_DEFAULT).unwrap();
         assert_eq!(d.sweep(&req(1_000_000, 180_000_000, 500), &mut |_| {}).unwrap().len(), 501);
+    }
+
+    #[test]
+    fn a_sweep_can_be_cancelled() {
+        let mut device = Device::with_timing(SimTransport::new(), Duration::ZERO, Duration::from_millis(50));
+        let outcome = device.sweep_with_cancel(&req(1_000_000, 30_000_000, 100), &mut |_| {}, &|| true);
+        assert!(matches!(outcome, Err(DeviceError::Cancelled)));
+        // The device goes on sending the sweep it was asked for: all of that must have been
+        // read away, or it would be taken for the answer to the next command.
+        assert!(device.transport().reply.is_empty(), "{} bytes left unread", device.transport().reply.len());
+        // The device is usable again afterwards.
+        assert_eq!(device.sweep(&req(1_000_000, 30_000_000, 100), &mut |_| {}).unwrap().len(), 101);
     }
 }

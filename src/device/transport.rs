@@ -105,6 +105,40 @@ pub fn probe_port(port: &str) -> bool {
 }
 
 /// The first port on which a miniVNA answers.
+/// USB vendor number of FTDI, whose serial chip the miniVNA uses.
+const FTDI_VID: u16 = 0x0403;
+
+/// Whether a port is worth probing. Probing writes a sweep command, so serial devices that
+/// are plainly something else (other USB makers, Bluetooth, built-in ports) are left alone.
+pub fn could_be_minivna(kind: &serialport::SerialPortType) -> bool {
+    match kind {
+        serialport::SerialPortType::UsbPort(usb) => usb.vid == FTDI_VID,
+        serialport::SerialPortType::Unknown => true,
+        _ => false,
+    }
+}
+
 pub fn find_minivna() -> Option<String> {
-    list_ports().into_iter().find(|port| probe_port(port))
+    let ports = serialport::available_ports().unwrap_or_default();
+    ports.into_iter().filter(|p| could_be_minivna(&p.port_type)).map(|p| p.port_name).find(|port| probe_port(port))
+}
+
+#[cfg(test)]
+mod tests {
+    use serialport::{SerialPortType, UsbPortInfo};
+
+    use super::*;
+
+    fn usb(vid: u16) -> SerialPortType {
+        SerialPortType::UsbPort(UsbPortInfo { vid, pid: 0x6001, serial_number: None, manufacturer: None, product: None })
+    }
+
+    #[test]
+    fn only_ports_that_can_be_a_minivna_are_probed() {
+        assert!(could_be_minivna(&usb(0x0403))); // FTDI, as in the miniVNA
+        assert!(!could_be_minivna(&usb(0x2341))); // some other USB serial device
+        assert!(!could_be_minivna(&SerialPortType::BluetoothPort));
+        assert!(!could_be_minivna(&SerialPortType::PciPort));
+        assert!(could_be_minivna(&SerialPortType::Unknown)); // cannot tell: try it
+    }
 }

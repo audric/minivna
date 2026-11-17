@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use super::plot::{curve_color, curve_name};
-use super::state::{AppState, Curve, View};
+use super::state::{parse_decimal, AppState, Curve, View};
 use super::text::t;
 use super::{color32, Action};
 
@@ -92,7 +92,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
     ui.radio_value(&mut state.scale_60db, true, t("Scale 60dB"));
     ui.horizontal(|ui| {
         ui.label(t("Offset"));
-        ui.add(egui::DragValue::new(&mut state.rl_offset_db).range(-60.0..=60.0).speed(0.5).suffix(" dB"));
+        ui.add(egui::DragValue::new(&mut state.rl_offset_db).range(-60.0..=60.0).speed(0.5).suffix(" dB").custom_parser(parse_decimal));
     });
 }
 

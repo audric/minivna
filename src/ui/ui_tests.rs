@@ -163,3 +163,132 @@ fn a_band_edit_is_kept_when_another_cell_is_clicked() {
         assert_eq!(value, 1.9, "edit of cell {edited} lost when clicking cell {clicked}");
     }
 }
+
+// ---- minor findings of the final review ----
+
+fn sweeps(actions: &[Action]) -> usize {
+    actions.iter().filter(|a| matches!(a, Action::SweepOnce | Action::SweepContinuous)).count()
+}
+
+#[test]
+fn space_on_a_focused_button_presses_only_that_button() {
+    let (mut h, mut s, mut actions) = (Harness::new(), state(), Vec::new());
+    let draw = |ui: &mut egui::Ui, s: &mut AppState, actions: &mut Vec<Action>| {
+        side_panel::show(ui, s, actions);
+        menu::sweep_keys(ui, false, actions);
+    };
+    h.frame(vec![], Modifiers::NONE, |ui| draw(ui, &mut s, &mut actions));
+    // No focus anywhere: Space is "one sweep".
+    h.frame(vec![key(Key::Space, Modifiers::NONE)], Modifiers::NONE, |ui| draw(ui, &mut s, &mut actions));
+    assert_eq!(sweeps(&actions), 1);
+    actions.clear();
+    // Tab puts the focus on the first button ("x Sweep"); Space now presses it, nothing more.
+    h.frame(vec![key(Key::Tab, Modifiers::NONE)], Modifiers::NONE, |ui| draw(ui, &mut s, &mut actions));
+    h.frame(vec![], Modifiers::NONE, |ui| draw(ui, &mut s, &mut actions));
+    let space_up = Event::Key { key: Key::Space, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE };
+    h.frame(vec![key(Key::Space, Modifiers::NONE)], Modifiers::NONE, |ui| draw(ui, &mut s, &mut actions));
+    h.frame(vec![space_up], Modifiers::NONE, |ui| draw(ui, &mut s, &mut actions));
+    h.frame(vec![], Modifiers::NONE, |ui| draw(ui, &mut s, &mut actions));
+    assert_eq!(sweeps(&actions), 1, "Space on a focused button");
+}
+
+#[test]
+fn escape_stops_the_sweep_except_from_the_entry_window() {
+    let (mut h, mut actions) = (Harness::new(), Vec::new());
+    h.frame(vec![key(Key::Escape, Modifiers::NONE)], Modifiers::NONE, |ui| menu::sweep_keys(ui, true, &mut actions));
+    assert!(actions.is_empty());
+    h.frame(vec![key(Key::Escape, Modifiers::NONE)], Modifiers::NONE, |ui| menu::sweep_keys(ui, false, &mut actions));
+    assert!(has(&actions, |a| matches!(a, Action::Stop)));
+}
+
+#[test]
+fn ctrl_and_shift_clicks_step_the_markers_on_the_smith_chart_too() {
+    let (mut h, mut s, mut actions) = (Harness::new(), swept(), Vec::new());
+    s.view = super::state::View::Smith;
+    (s.m1, s.m2) = (Some(10), Some(20));
+    let pos = egui::pos2(600.0, 450.0);
+    let mut click = |h: &mut Harness, s: &mut AppState, modifiers: Modifiers, button: PointerButton| {
+        let press = |pressed| Event::PointerButton { pos, button, pressed, modifiers };
+        for events in [vec![Event::PointerMoved(pos)], vec![press(true)], vec![press(false)], vec![]] {
+            h.frame(events, modifiers, |ui| super::graph::show(ui, s, &mut actions));
+        }
+    };
+    click(&mut h, &mut s, CTRL, PointerButton::Primary);
+    assert_eq!(s.m1, Some(9));
+    click(&mut h, &mut s, SHIFT, PointerButton::Secondary);
+    assert_eq!(s.m2, Some(21));
+}
+
+mod app {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::store::Settings;
+    use crate::sweep::PortChoice;
+    use crate::ui::App;
+
+    fn app() -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let app = App::new(&ctx, PortChoice::Simulated, Settings::default(), None, false, dir.path().join("calibration.toml"));
+        (app, dir)
+    }
+
+    /// Handle worker events until `done` holds; panics after three seconds.
+    fn wait(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            app.pump();
+            if done(app) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_continuous_sweep_follows_a_band_change() {
+        let (mut app, _dir) = app();
+        app.apply(Action::SweepContinuous);
+        wait(&mut app, "the first sweep", |a| a.state.result.is_some());
+        app.apply(Action::Band(5));
+        wait(&mut app, "a sweep of the band", |a| a.state.result.as_ref().is_some_and(|r| r.request.start_hz == 13_900_000));
+        assert!(app.state.continuous && app.state.busy);
+        app.apply(Action::Stop);
+        wait(&mut app, "the stop", |a| !a.state.busy);
+        assert!(!app.state.continuous);
+    }
+
+    #[test]
+    fn the_generator_keeps_sweeps_and_mode_changes_out() {
+        let (mut app, _dir) = app();
+        app.apply(Action::SetMode(UiMode::Generator));
+        assert!(app.dialogs.generator.open);
+        app.apply(Action::SweepOnce);
+        app.apply(Action::SetMode(UiMode::CableLoss));
+        std::thread::sleep(Duration::from_millis(300));
+        app.pump();
+        assert!(app.state.result.is_none() && !app.state.busy);
+        assert_eq!(app.state.mode, UiMode::Generator);
+    }
+
+    #[test]
+    fn stop_ends_a_calibration_without_storing_anything() {
+        let (mut app, dir) = app();
+        app.apply(Action::Send(crate::sweep::Command::Calibrate(crate::device::Mode::Reflection, true, crate::device::DDS_FACTOR_DEFAULT)));
+        wait(&mut app, "busy", |a| a.state.busy);
+        app.apply(Action::Stop);
+        wait(&mut app, "idle", |a| !a.state.busy);
+        assert!(app.state.calibration.reflection.is_none());
+        assert!(!dir.path().join("calibration.toml").exists());
+    }
+
+    #[test]
+    fn a_calibration_is_stored_in_the_given_file() {
+        let (mut app, dir) = app();
+        app.apply(Action::Send(crate::sweep::Command::Calibrate(crate::device::Mode::Reflection, true, crate::device::DDS_FACTOR_DEFAULT)));
+        wait(&mut app, "the table", |a| a.state.calibration.reflection.is_some());
+        assert!(dir.path().join("calibration.toml").exists());
+    }
+}

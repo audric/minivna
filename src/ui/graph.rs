@@ -29,36 +29,39 @@ fn clicks(ui: &egui::Ui, response: &egui::Response, state: &mut AppState) {
         return;
     }
     let Some(pos) = response.interact_pointer_pos() else { return };
-    if state.view == View::Smith {
-        // On the Smith chart a click takes the nearest point of the trace: left M1, right M2.
-        let (x, y) = (pos.x - response.rect.min.x, pos.y - response.rect.min.y);
-        let found = smith::nearest_index(state, response.rect.width(), response.rect.height(), x, y);
-        if let (Some(index), false) = (found, middle) {
-            let freq = state.points()[index].freq_hz;
-            state.place_marker(if left { Marker::M1 } else { Marker::M2 }, freq);
-        }
-        return;
-    }
-    let frame = plot::Frame::new(response.rect.width(), response.rect.height());
     let (x, y) = (pos.x - response.rect.min.x, pos.y - response.rect.min.y);
-    if !frame.contains(x, y) {
+    let (width, height) = (response.rect.width(), response.rect.height());
+    let frame = plot::Frame::new(width, height);
+    let smith = state.view == View::Smith;
+    if !smith && !frame.contains(x, y) {
         return;
     }
     if middle {
-        state.toggle_memo(frame.height_at(y));
+        if !smith {
+            state.toggle_memo(frame.height_at(y));
+        }
         return;
     }
+    // The stepping and band-default clicks do not depend on where the pointer is, so they
+    // work the same on the Smith chart.
     let modifiers = ui.input(|i| i.modifiers);
     let direction = if left { -1 } else { 1 };
+    let marker = if left { Marker::M1 } else { Marker::M2 };
     if modifiers.ctrl || modifiers.command {
         state.step_marker(Marker::M1, direction);
     } else if modifiers.shift {
         state.step_marker(Marker::M2, direction);
     } else if modifiers.alt {
-        state.marker_to_band_default(if left { Marker::M1 } else { Marker::M2 });
+        state.marker_to_band_default(marker);
+    } else if smith {
+        // On the Smith chart a click takes the nearest point of the trace.
+        if let Some(index) = smith::nearest_index(state, width, height, x, y) {
+            let freq = state.points()[index].freq_hz;
+            state.place_marker(marker, freq);
+        }
     } else {
         let (lo, hi) = plot::x_range_hz(state);
-        state.place_marker(if left { Marker::M1 } else { Marker::M2 }, frame.freq_at(x, lo, hi));
+        state.place_marker(marker, frame.freq_at(x, lo, hi));
     }
 }
 

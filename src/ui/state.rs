@@ -43,6 +43,22 @@ impl Curve {
 }
 
 impl UiMode {
+    /// The name used in the settings file.
+    pub fn key(self) -> &'static str {
+        match self {
+            UiMode::Antenna => "antenna",
+            UiMode::CableLoss => "cable-loss",
+            UiMode::CableLength => "cable-length",
+            UiMode::Transmission => "transmission",
+            UiMode::Generator => "generator",
+        }
+    }
+
+    /// The mode to start in: the saved one, except that the generator never starts by itself.
+    pub fn from_key(key: &str) -> UiMode {
+        [UiMode::CableLoss, UiMode::CableLength, UiMode::Transmission].into_iter().find(|m| m.key() == key).unwrap_or(UiMode::Antenna)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             UiMode::Antenna => "Antenna",
@@ -127,10 +143,11 @@ impl AppState {
         let start_hz = (settings.start_mhz * 1e6).round() as u64;
         let stop_hz = (settings.stop_mhz * 1e6).round() as u64;
         let samples = settings.samples;
+        let mode = UiMode::from_key(&settings.last_mode);
         AppState {
             settings,
             calibration,
-            mode: UiMode::Antenna,
+            mode,
             extender: 1,
             start_text: mhz_text(start_hz),
             stop_text: mhz_text(stop_hz),
@@ -278,6 +295,7 @@ impl AppState {
                 self.status = text;
                 self.busy = false;
                 self.continuous = false;
+                self.auto_pass = 0;
             }
         }
     }
@@ -509,6 +527,7 @@ impl AppState {
             return false;
         }
         self.mode = mode;
+        self.settings.last_mode = mode.key().to_string();
         if let Some(last) = self.points().len().checked_sub(1) {
             self.m1 = Some((last as f64 / 3.0).round() as usize);
             self.m2 = Some((last as f64 * 0.66).round() as usize);
@@ -534,6 +553,12 @@ impl AppState {
         self.zoom_stack.clear();
         self.current_band = None;
         true
+    }
+
+    /// Whether a band lies within what the device can do with the present extender.
+    pub fn band_reachable(&self, index: usize) -> bool {
+        let (low, high) = self.limits_hz();
+        self.settings.bands.get(index).is_some_and(|b| b.start_mhz * 1e6 >= low as f64 && b.stop_mhz * 1e6 <= high as f64)
     }
 
     /// Select a band preset. False if the band does not exist or cannot be reached
@@ -562,7 +587,7 @@ impl AppState {
 
     /// Select a frequency extender (1 = none, 4, 8 or 16). The range becomes the full range.
     pub fn set_extender(&mut self, mult: u8) {
-        if [1, 4, 8, 16].contains(&mult) {
+        if [1, 4, 8, 16].contains(&mult) && mult != self.extender {
             self.extender = mult;
             self.apply_full_range();
         }
@@ -638,6 +663,11 @@ impl AppState {
     }
 }
 
+/// A plain number typed by hand: a point or a comma as the decimal mark, may be negative.
+pub fn parse_decimal(text: &str) -> Option<f64> {
+    text.trim().replace(',', ".").parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
 /// Adjust the trial Hz-to-device factor of the DDS calibration, within sane limits.
 pub fn nudge_dds(trial: f64, step: f64) -> f64 {
     (trial + step).clamp(10.0, 11.5)
@@ -711,7 +741,11 @@ impl AppState {
         (self.m1, self.m2) = (view.m1, view.m2);
         self.show = view.show;
         self.scale_60db = view.scale_60db;
-        self.rl_offset_db = view.rl_offset_db.clamp(-60.0, 60.0);
+        self.rl_offset_db = if view.rl_offset_db.is_finite() { view.rl_offset_db.clamp(-60.0, 60.0) } else { 0.0 };
+        // A sweep made with an extender switches it on: its menu must be there to switch it off.
+        if self.extender > 1 {
+            self.settings.extender_menu = true;
+        }
         self.status.clear();
     }
 
@@ -748,18 +782,19 @@ impl AppState {
     /// text is not a frequency or would leave the band without a valid range.
     pub fn set_band_field(&mut self, index: usize, field: BandField, text: &str) -> bool {
         let (Some(band), Some(mhz)) = (self.settings.bands.get_mut(index), parse_mhz(text)) else { return false };
-        let highest = F_MAX_HZ as f64 / 1e6 * 16.0;
-        let (mut start, mut stop) = (band.start_mhz, band.stop_mhz);
+        let (lowest, highest) = (F_MIN_HZ as f64 / 1e6, F_MAX_HZ as f64 / 1e6 * 16.0);
+        let (mut start, mut stop, mut m1, mut m2) = (band.start_mhz, band.stop_mhz, band.m1_mhz, band.m2_mhz);
         match field {
             BandField::Start => start = mhz,
             BandField::Stop => stop = mhz,
-            BandField::M1 => band.m1_mhz = mhz,
-            BandField::M2 => band.m2_mhz = mhz,
+            BandField::M1 => m1 = mhz,
+            BandField::M2 => m2 = mhz,
         }
-        if start < F_MIN_HZ as f64 / 1e6 || stop > highest || start >= stop {
+        if start < lowest || stop > highest || start >= stop {
+            self.status = format!("!!! {} ({lowest} - {highest} MHz)", t("Begin must be below End"));
             return false;
         }
-        (band.start_mhz, band.stop_mhz) = (start, stop);
+        (band.start_mhz, band.stop_mhz, band.m1_mhz, band.m2_mhz) = (start, stop, m1, m2);
         band.needs_extender = stop > F_MAX_HZ as f64 / 1e6;
         true
     }
@@ -1392,5 +1427,94 @@ pub(crate) mod tests {
         let freq = |i: Option<usize>| s.result.as_ref().unwrap().points[i.unwrap()].freq_hz;
         assert!((freq(s.m1) - 14.0e6).abs() < 2100.0);
         assert!((freq(s.m2) - 14.35e6).abs() < 2100.0);
+    }
+
+    // ---- minor findings of the final review ----
+
+    #[test]
+    fn a_failed_sweep_ends_the_cable_length_search() {
+        let mut s = swept();
+        s.auto_length_start();
+        s.on_event(Event::Error("unplugged".into()));
+        assert!(!s.auto_length_running());
+    }
+
+    #[test]
+    fn plain_numbers_take_a_point_or_a_comma() {
+        assert_eq!(parse_decimal("0,66"), Some(0.66));
+        assert_eq!(parse_decimal(" -3.5 "), Some(-3.5));
+        assert_eq!(parse_decimal("1.2.3"), None);
+        assert_eq!(parse_decimal(""), None);
+        assert_eq!(parse_decimal("nan"), None);
+        assert_eq!(parse_decimal("inf"), None);
+    }
+
+    #[test]
+    fn the_last_mode_is_remembered() {
+        let mut s = swept();
+        assert!(s.set_mode(UiMode::CableLength));
+        assert_eq!(s.settings.last_mode, "cable-length");
+        let again = AppState::new(s.settings.clone(), Calibration::default());
+        assert_eq!(again.mode, UiMode::CableLength);
+
+        // The generator is never started by itself, and nonsense means Antenna.
+        for text in ["generator", "what"] {
+            let settings = Settings { last_mode: text.into(), ..Default::default() };
+            assert_eq!(AppState::new(settings, Calibration::default()).mode, UiMode::Antenna);
+        }
+    }
+
+    #[test]
+    fn an_odd_sweep_file_cannot_spoil_the_view() {
+        let mut file = swept().to_sweep_file().unwrap();
+        file.view.rl_offset_db = f64::NAN;
+        let mut s = state();
+        s.load_sweep_file(file);
+        assert_eq!(s.rl_offset_db, 0.0);
+    }
+
+    #[test]
+    fn a_file_made_with_an_extender_shows_the_extender_menu() {
+        let mut source = state();
+        source.set_extender(4);
+        source.on_event(Event::Sweep(SweepResult {
+            request: SweepRequest { extender: 4, ..fake_result(4_000_000, 720_000_000, 290).request },
+            ..fake_result(4_000_000, 720_000_000, 290)
+        }));
+        let file = source.to_sweep_file().unwrap();
+        let mut s = state();
+        assert!(!s.settings.extender_menu);
+        s.load_sweep_file(file);
+        assert_eq!(s.extender, 4);
+        assert!(s.settings.extender_menu);
+    }
+
+    #[test]
+    fn a_refused_band_cell_says_why_and_changes_nothing() {
+        let mut s = state();
+        let before = s.settings.bands[5].clone();
+        assert!(!s.set_band_field(5, BandField::Start, "20"));
+        assert!(s.status.contains("Begin"), "{:?}", s.status);
+        assert_eq!(s.settings.bands[5], before);
+    }
+
+    #[test]
+    fn a_band_is_reachable_only_with_enough_extender() {
+        let mut s = state();
+        let cm13 = s.settings.bands.iter().position(|b| b.stop_mhz == 2500.0).expect("the 13 cm band");
+        let m2 = s.settings.bands.iter().position(|b| b.stop_mhz == 146.1).expect("the 2 m band");
+        assert!(s.band_reachable(m2) && !s.band_reachable(cm13) && !s.band_reachable(999));
+        s.set_extender(8);
+        assert!(!s.band_reachable(cm13));
+        s.set_extender(16);
+        assert!(s.band_reachable(cm13));
+    }
+
+    #[test]
+    fn choosing_the_extender_already_in_use_keeps_the_range() {
+        let mut s = state();
+        s.set_range(7_000_000, 7_200_000);
+        s.set_extender(1);
+        assert_eq!((s.start_hz, s.stop_hz), (7_000_000, 7_200_000));
     }
 }

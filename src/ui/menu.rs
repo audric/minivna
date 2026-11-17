@@ -84,7 +84,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
             }
             ui.separator();
             for (index, band) in state.settings.bands.iter().enumerate() {
-                let reachable = !band.needs_extender || state.extender > 1;
+                let reachable = state.band_reachable(index);
                 let button = egui::Button::new(band.name.as_str())
                     .selected(state.current_band == Some(index))
                     .shortcut_text(band_shortcut(index));
@@ -137,6 +137,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
             }
             ui.separator();
             ui.checkbox(&mut state.settings.step_bug, t("Compensate for firmware Step bug"));
+            // Hiding the menu also switches the extender off (nothing happens if it was off).
             if ui.checkbox(&mut state.settings.extender_menu, t("Enable menu of Frequency Extender")).changed()
                 && !state.settings.extender_menu
             {
@@ -195,6 +196,24 @@ pub fn shortcuts(ui: &egui::Ui, state: &AppState, actions: &mut Vec<Action>) {
         }
         if input.consume_key(ctrl, egui::Key::Q) {
             actions.push(Action::Quit);
+        }
+    });
+}
+
+/// Space = one sweep, F12 = continuous, Esc = stop.
+/// Space is left alone while anything has the keyboard (a text box takes it as a blank, a
+/// focused button as a press), and Esc while the small entry window is open, which it closes.
+pub fn sweep_keys(ui: &egui::Ui, entry_open: bool, actions: &mut Vec<Action>) {
+    let something_focused = ui.ctx().memory(|m| m.focused().is_some());
+    ui.input(|input| {
+        if input.key_pressed(egui::Key::Escape) && !entry_open {
+            actions.push(Action::Stop);
+        }
+        if input.key_pressed(egui::Key::F12) {
+            actions.push(Action::SweepContinuous);
+        }
+        if input.key_pressed(egui::Key::Space) && !something_focused {
+            actions.push(Action::SweepOnce);
         }
     });
 }

@@ -85,7 +85,7 @@ pub fn spawn(port: PortChoice, cal: Calibration, wake: Box<dyn Fn() + Send>) -> 
     let (events, rx) = mpsc::channel();
     let thread = std::thread::Builder::new()
         .name("minivna-sweep".into())
-        .spawn(move || Runner { port, cal, signed: false, device: None, commands, events, wake }.run())
+        .spawn(move || Runner { port, cal, signed: false, device: None, commands, events, wake, waiting: Default::default() }.run())
         .expect("cannot start the sweep thread");
     Worker { tx, rx, thread: Some(thread) }
 }
@@ -101,6 +101,8 @@ struct Runner {
     commands: Receiver<Command>,
     events: Sender<Event>,
     wake: Box<dyn Fn() + Send>,
+    /// Commands that arrived while a sweep was being read, in order.
+    waiting: std::cell::RefCell<std::collections::VecDeque<Command>>,
 }
 
 impl Runner {
@@ -112,7 +114,8 @@ impl Runner {
     fn run(mut self) {
         let mut next = None;
         loop {
-            let command = match next.take() {
+            let waiting = self.waiting.borrow_mut().pop_front();
+            let command = match next.take().or(waiting) {
                 Some(command) => command,
                 None => match self.commands.recv() {
                     Ok(command) => command,
@@ -161,6 +164,7 @@ impl Runner {
         loop {
             match self.measure(request) {
                 Ok(result) => self.emit(Event::Sweep(result)),
+                Err(DeviceError::Cancelled) => {}
                 Err(e) => {
                     self.close();
                     self.emit(Event::Error(e.to_string()));
@@ -168,12 +172,30 @@ impl Runner {
                     return None;
                 }
             }
-            let pending = match self.commands.try_recv() {
+            let waiting = self.waiting.borrow_mut().pop_front();
+            let arrived = match waiting {
+                Some(command) => Ok(command),
+                None => self.commands.try_recv(),
+            };
+            let pending = match arrived {
                 Ok(Command::Stop) => None,
+                // Settings are taken over and the sweep goes on.
+                Ok(Command::SetSigned(signed)) => {
+                    self.signed = signed;
+                    continue;
+                }
+                Ok(Command::SetCalibration(cal)) => {
+                    self.cal = cal;
+                    continue;
+                }
                 Ok(other) => Some(other),
                 Err(TryRecvError::Empty) => continue,
                 Err(TryRecvError::Disconnected) => Some(Command::Shutdown),
             };
+            // A new continuous sweep takes over directly: the device stays busy.
+            if matches!(pending, Some(Command::Continuous(_))) {
+                return pending;
+            }
             self.park_and_close();
             self.emit(Event::Busy(false));
             return pending;
@@ -187,6 +209,8 @@ impl Runner {
                 self.park_and_close();
                 self.emit(event);
             }
+            // Stopped by the user: not an error. The device is parked like after a sweep.
+            Err(DeviceError::Cancelled) => self.park_and_close(),
             Err(e) => {
                 self.close();
                 self.emit(Event::Error(e.to_string()));
@@ -198,11 +222,12 @@ impl Runner {
     fn open(&mut self) -> Result<&mut AnyDevice, DeviceError> {
         if self.device.is_none() {
             let device = match &self.port {
-                PortChoice::Simulated => Device::with_timing(
-                    Box::new(SimTransport::new()) as Box<dyn Transport>,
-                    Duration::ZERO,
-                    Duration::from_millis(50),
-                ),
+                PortChoice::Simulated => {
+                    // About as slow as the real device, so that the simulation neither
+                    // floods the window nor keeps a processor core busy.
+                    let sim = SimTransport { pace: Duration::from_millis(120), ..SimTransport::new() };
+                    Device::with_timing(Box::new(sim) as Box<dyn Transport>, Duration::ZERO, Duration::from_secs(1))
+                }
                 PortChoice::Serial(name) => Device::new(Box::new(SerialTransport::open(name)?) as Box<dyn Transport>),
             };
             self.device = Some(device);
@@ -226,10 +251,26 @@ impl Runner {
         self.open()?;
         let wake = &self.wake;
         let device = self.device.as_mut().expect("open");
-        device.sweep(request, &mut |fraction| {
-            let _ = events.send(Event::Progress(fraction));
-            wake();
-        })
+        // While the reply is being read, look at what arrives: Stop (or the end of the
+        // program) interrupts the sweep, anything else waits its turn.
+        let (commands, waiting) = (&self.commands, &self.waiting);
+        let cancelled = || {
+            let mut waiting = waiting.borrow_mut();
+            match commands.try_recv() {
+                Ok(command) => waiting.push_back(command),
+                Err(TryRecvError::Disconnected) => waiting.push_back(Command::Shutdown),
+                Err(TryRecvError::Empty) => {}
+            }
+            waiting.iter().any(|c| matches!(c, Command::Stop | Command::Shutdown))
+        };
+        device.sweep_with_cancel(
+            request,
+            &mut |fraction| {
+                let _ = events.send(Event::Progress(fraction));
+                wake();
+            },
+            &cancelled,
+        )
     }
 
     fn measure(&mut self, request: &SweepRequest) -> Result<SweepResult, DeviceError> {
@@ -386,5 +427,61 @@ mod tests {
         w.tx.send(Command::Continuous(req(1_000_000, 30_000_000, 100))).unwrap();
         assert!(w.shutdown(Duration::from_secs(5)));
         assert!(w.tx.send(Command::Park).is_err(), "the worker should be gone");
+    }
+
+    fn next_event(w: &Worker) -> Event {
+        w.rx.recv_timeout(Duration::from_secs(3)).expect("worker went quiet")
+    }
+
+    #[test]
+    fn a_setting_change_does_not_stop_a_continuous_sweep() {
+        let w = spawn(PortChoice::Simulated, Calibration::default(), Box::new(|| {}));
+        w.tx.send(Command::Continuous(req(1_000_000, 30_000_000, 100))).unwrap();
+        while !matches!(next_event(&w), Event::Sweep(_)) {}
+        w.tx.send(Command::SetSigned(true)).unwrap();
+        w.tx.send(Command::SetCalibration(Calibration::default())).unwrap();
+        let mut sweeps = 0;
+        while sweeps < 3 {
+            match next_event(&w) {
+                Event::Sweep(_) => sweeps += 1,
+                Event::Busy(false) => panic!("the sweep stopped"),
+                _ => {}
+            }
+        }
+        w.tx.send(Command::Shutdown).unwrap();
+    }
+
+    #[test]
+    fn stop_interrupts_a_single_sweep() {
+        let w = spawn(PortChoice::Simulated, Calibration::default(), Box::new(|| {}));
+        w.tx.send(Command::Single(req(1_000_000, 30_000_000, 500))).unwrap();
+        w.tx.send(Command::Stop).unwrap();
+        loop {
+            match next_event(&w) {
+                Event::Busy(false) => break,
+                Event::Sweep(_) => panic!("the sweep was not interrupted"),
+                Event::Error(why) => panic!("stopping is not an error: {why}"),
+                _ => {}
+            }
+        }
+        // And the worker still works afterwards.
+        w.tx.send(Command::Single(req(1_000_000, 30_000_000, 100))).unwrap();
+        while !matches!(next_event(&w), Event::Sweep(_)) {}
+        w.tx.send(Command::Shutdown).unwrap();
+    }
+
+    #[test]
+    fn the_simulated_device_takes_its_time() {
+        let w = spawn(PortChoice::Simulated, Calibration::default(), Box::new(|| {}));
+        w.tx.send(Command::Continuous(req(1_000_000, 30_000_000, 100))).unwrap();
+        let started = std::time::Instant::now();
+        let mut sweeps = 0;
+        while started.elapsed() < Duration::from_millis(600) {
+            if let Ok(Event::Sweep(_)) = w.rx.recv_timeout(Duration::from_millis(50)) {
+                sweeps += 1;
+            }
+        }
+        assert!((1..=10).contains(&sweeps), "{sweeps} sweeps in 0.6 s");
+        w.tx.send(Command::Shutdown).unwrap();
     }
 }

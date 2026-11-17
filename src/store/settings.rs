@@ -150,6 +150,9 @@ pub struct Settings {
     pub png: Colors,
     pub bands: Vec<Band>,
     pub velocities: Vec<Velocity>,
+    /// The mode the program was last in (see `UiMode::key`).
+    #[serde(default)]
+    pub last_mode: String,
     /// Window position and size: x, y, width, height.
     pub window: Option<[f32; 4]>,
 }
@@ -175,6 +178,7 @@ impl Default for Settings {
             png: Colors::default(),
             bands: default_bands(),
             velocities: default_velocities(),
+            last_mode: String::new(),
             window: None,
         }
     }
@@ -194,10 +198,15 @@ impl Settings {
                 settings.repair();
                 (settings, None)
             }
-            Err(e) => (
-                Settings::default(),
-                Some(format!("Settings file is damaged ({}); using defaults.", e.message())),
-            ),
+            Err(e) => {
+                // Keep the damaged file: on exit the defaults are written over the original.
+                let aside = path.with_extension("toml.damaged");
+                let kept = match std::fs::copy(path, &aside) {
+                    Ok(_) => format!("the old file was kept as {}", aside.display()),
+                    Err(copy) => format!("the old file could not be kept aside ({copy})"),
+                };
+                (Settings::default(), Some(format!("Settings file is damaged ({}); using defaults; {kept}.", e.message())))
+            }
         }
     }
 
@@ -312,5 +321,15 @@ mod tests {
         assert_eq!(s.velocity, 0.66);
         assert_eq!(s.dds_factor, 10.73741824);
         assert_eq!(s.bands.len(), 19);
+    }
+
+    #[test]
+    fn a_damaged_file_is_kept_aside_before_defaults_replace_it() {
+        let (dir, path) = file("bands = this is not toml");
+        let (settings, notice) = Settings::load(&path);
+        assert_eq!(settings, Settings::default());
+        assert!(notice.unwrap().contains("settings.toml.damaged"));
+        let kept = std::fs::read_to_string(dir.path().join("settings.toml.damaged")).unwrap();
+        assert_eq!(kept, "bands = this is not toml");
     }
 }

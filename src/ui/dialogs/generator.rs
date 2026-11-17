@@ -7,8 +7,13 @@ use crate::ui::state::{generator_freq_step, AppState, UiMode};
 use crate::ui::text::t;
 use crate::ui::Action;
 
-/// One column of up/down buttons per digit, from 100 MHz down to 1 Hz.
-const STEPS: [i64; 9] = [100_000_000, 10_000_000, 1_000_000, 100_000, 10_000, 1_000, 100, 10, 1];
+/// One column of up/down buttons per digit, from 1 GHz (reached with an extender) down to 1 Hz.
+const STEPS: [i64; 10] = [1_000_000_000, 100_000_000, 10_000_000, 1_000_000, 100_000, 10_000, 1_000, 100, 10, 1];
+
+/// The frequency as ten digits, one per column of buttons.
+fn digits(freq_hz: u64) -> String {
+    format!("{:010}", freq_hz.min(9_999_999_999))
+}
 
 pub struct GeneratorDialog {
     pub open: bool,
@@ -42,7 +47,7 @@ impl GeneratorDialog {
         }
         let mut close = false;
         egui::Window::new(t("Generator :")).collapsible(false).resizable(false).show(ctx, |ui| {
-            let digits = format!("{:010}", self.freq_hz);
+            let digits = digits(self.freq_hz);
             let mut delta = 0i64;
             egui::Grid::new("generator digits").spacing([2.0, 2.0]).show(ui, |ui| {
                 for step in STEPS {
@@ -52,7 +57,7 @@ impl GeneratorDialog {
                 }
                 ui.end_row();
                 for (i, _) in STEPS.iter().enumerate() {
-                    ui.label(egui::RichText::new(&digits[i + 1..i + 2]).monospace().size(22.0));
+                    ui.label(egui::RichText::new(&digits[i..i + 1]).monospace().size(22.0));
                 }
                 ui.label("Hz");
                 ui.end_row();
@@ -75,5 +80,18 @@ impl GeneratorDialog {
             actions.push(Action::Send(Command::Park));
             actions.push(Action::SetMode(UiMode::Antenna));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_digit_up_to_the_gigahertz_is_shown() {
+        assert_eq!(digits(1_440_000_000), "1440000000");
+        assert_eq!(digits(10_000_000), "0010000000");
+        assert_eq!(STEPS.len(), 10);
+        assert_eq!(STEPS[0], 1_000_000_000);
     }
 }

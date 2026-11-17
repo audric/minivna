@@ -70,6 +70,10 @@ impl CalDialog {
                 Step::Measuring => {
                     ui.label(t("Measuring..."));
                     ui.add(egui::ProgressBar::new(state.progress).show_percentage());
+                    if ui.button(t("Cancel")).clicked() {
+                        actions.push(Action::Stop);
+                        close = true;
+                    }
                 }
                 Step::Done => {
                     ui.label(t("Ended operations."));

@@ -16,7 +16,7 @@ fn main() -> eframe::Result<()> {
         settings.port = Some(name.clone());
         PortChoice::Serial(name)
     } else {
-        notice.get_or_insert_with(|| "MiniVNA not found: using the simulated device. Choose a port in Configure.".to_string());
+        notice.get_or_insert_with(|| minivna::ui::text::t("MiniVNA not found: using the simulated device. Choose a port in Configure.").to_string());
         PortChoice::Simulated
     };
 

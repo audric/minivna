@@ -96,18 +96,29 @@ pub struct App {
     title: String,
     quit: bool,
     dialogs: dialogs::Dialogs,
+    cal_path: std::path::PathBuf,
+    /// Where the window was last seen: x, y, width, height.
+    window: Option<[f32; 4]>,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, port: PortChoice, settings: Settings, notice: Option<String>, sweep_at_start: bool) -> Self {
-        let (calibration, cal_notice) = match Calibration::load(&store::calibration_path()) {
+    /// `cal_path` is where the calibration is read from and written to.
+    fn new(
+        ctx: &egui::Context,
+        port: PortChoice,
+        settings: Settings,
+        notice: Option<String>,
+        sweep_at_start: bool,
+        cal_path: std::path::PathBuf,
+    ) -> Self {
+        let (calibration, cal_notice) = match Calibration::load(&cal_path) {
             Ok(cal) => (cal, None),
             Err(e) => (Calibration::default(), Some(e.to_string())),
         };
         // A light window like the original's: entry and read-out fields are white boxes with
         // a border, clearly apart from the grey panels. Not tied to the desktop's dark mode.
-        cc.egui_ctx.set_theme(egui::Theme::Light);
-        cc.egui_ctx.all_styles_mut(|style| {
+        ctx.set_theme(egui::Theme::Light);
+        ctx.all_styles_mut(|style| {
             let border = egui::Stroke::new(1.0, egui::Color32::from_gray(140));
             style.visuals.widgets.inactive.bg_stroke = border;
             style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(170));
@@ -115,7 +126,7 @@ impl App {
             style.visuals.panel_fill = egui::Color32::from_gray(228);
             style.visuals.window_fill = egui::Color32::from_gray(236);
         });
-        let ctx = cc.egui_ctx.clone();
+        let ctx = ctx.clone();
         let worker = sweep::spawn(port.clone(), calibration.clone(), Box::new(move || ctx.request_repaint()));
         let mut state = AppState::new(settings, calibration);
         // `--smith` starts on the Smith chart.
@@ -125,7 +136,7 @@ impl App {
         let _ = worker.tx.send(Command::SetSigned(state.settings.signed_phase));
         let uncalibrated = state.calibration.reflection.is_none().then(|| text::t("Please calibrate your miniVNA first (Configure menu).").to_string());
         state.status = notice.or(cal_notice).or(uncalibrated).unwrap_or_default();
-        App { state, worker, port, sweep_at_start, about_open: false, title: String::new(), quit: false, dialogs: Default::default() }
+        App { state, worker, port, sweep_at_start, about_open: false, title: String::new(), quit: false, dialogs: Default::default(), cal_path, window: None }
     }
 
     fn send(&self, command: Command) {
@@ -140,6 +151,7 @@ impl App {
     }
 
     fn apply(&mut self, action: Action) {
+        self.sync_device_held();
         match action {
             // A running continuous sweep takes over new settings (range, band, mode);
             // a single sweep in progress, or the generator, makes the request wait.
@@ -281,31 +293,40 @@ impl App {
         }
     }
 
-    /// Space = one sweep, F12 = continuous, Esc = stop. Ignored while a text box has the keyboard.
-    fn keys(&self, ui: &egui::Ui, actions: &mut Vec<Action>) {
-        let typing = ui.ctx().text_edit_focused();
-        ui.input(|input| {
-            if input.key_pressed(egui::Key::Escape) {
-                actions.push(Action::Stop);
-            }
-            if input.key_pressed(egui::Key::F12) {
-                actions.push(Action::SweepContinuous);
-            }
-            if input.key_pressed(egui::Key::Space) && !typing {
-                actions.push(Action::SweepOnce);
-            }
-        });
-    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.pump();
+        self.remember_window(ui.ctx());
+        self.frame(ui);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Wait for the worker to park the device, so that the output is not left running.
+        self.worker.shutdown(std::time::Duration::from_secs(3));
+        self.state.settings.start_mhz = self.state.start_hz as f64 / 1e6 / self.state.extender as f64;
+        self.state.settings.stop_mhz = self.state.stop_hz as f64 / 1e6 / self.state.extender as f64;
+        self.state.settings.samples = self.state.samples;
+        self.state.settings.repair();
+        if self.window.is_some() {
+            self.state.settings.window = self.window;
+        }
+        if let Err(e) = self.state.settings.save(&store::settings_path()) {
+            eprintln!("minivna: the settings could not be saved: {e}");
+        }
+    }
+}
+
+impl App {
+    /// Take in what the sweep worker has reported since the last call.
+    fn pump(&mut self) {
         while let Ok(event) = self.worker.rx.try_recv() {
             let is_sweep = matches!(event, sweep::Event::Sweep(_));
             let failed = matches!(event, sweep::Event::Error(_));
             let event = match event {
                 sweep::Event::CalTable(mode, table) => {
-                    let stored = self.state.store_cal_table(mode, table, &store::calibration_path());
+                    let stored = self.state.store_cal_table(mode, table, &self.cal_path);
                     self.send(Command::SetCalibration(self.state.calibration.clone()));
                     self.dialogs.calibrate.finished(stored.map_err(|e| e.to_string()));
                     continue;
@@ -326,6 +347,18 @@ impl eframe::App for App {
                 }
             }
         }
+    }
+
+    /// The window position and size, for the next start.
+    fn remember_window(&mut self, ctx: &egui::Context) {
+        let (outer, inner) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+        if let (Some(outer), Some(inner)) = (outer, inner) {
+            self.window = Some([outer.min.x, outer.min.y, inner.width(), inner.height()]);
+        }
+    }
+
+    /// Draw one frame and carry out what the user asked for in it.
+    fn frame(&mut self, ui: &mut egui::Ui) {
         self.update_title(ui.ctx());
         if self.quit {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -357,6 +390,7 @@ impl eframe::App for App {
             graph::show(ui, &mut self.state, &mut actions);
         });
 
+        let entry_open = self.state.entry.is_some();
         marker_panel::entry_dialog(ui.ctx(), &mut self.state);
         menu::about(ui.ctx(), &mut self.about_open);
         self.dialogs.port.show(ui.ctx(), &self.state, &self.port, &mut actions);
@@ -368,7 +402,7 @@ impl eframe::App for App {
         self.dialogs.velocity.show(ui.ctx(), &mut self.state);
         self.dialogs.lc.show(ui.ctx(), &mut self.state);
         menu::shortcuts(ui, &self.state, &mut actions);
-        self.keys(ui, &mut actions);
+        menu::sweep_keys(ui, entry_open, &mut actions);
 
         self.sync_device_held();
         for action in actions {
@@ -376,24 +410,21 @@ impl eframe::App for App {
         }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Wait for the worker to park the device, so that the output is not left running.
-        self.worker.shutdown(std::time::Duration::from_secs(3));
-        self.state.settings.start_mhz = self.state.start_hz as f64 / 1e6 / self.state.extender as f64;
-        self.state.settings.stop_mhz = self.state.stop_hz as f64 / 1e6 / self.state.extender as f64;
-        self.state.settings.samples = self.state.samples;
-        self.state.settings.repair();
-        let _ = self.state.settings.save(&store::settings_path());
-    }
 }
 
 /// Open the window and run until it is closed.
 pub fn run(port: PortChoice, settings: Settings, notice: Option<String>, sweep_at_start: bool) -> eframe::Result<()> {
+    // The saved window, if it is sane; some desktops (Wayland) ignore the position.
+    let saved = settings.window.filter(|w| w.iter().all(|v| v.is_finite()) && w[2] >= 760.0 && w[3] >= 480.0 && w[2] <= 10_000.0 && w[3] <= 10_000.0);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("minivna")
+        .with_inner_size(saved.map_or([1100.0, 760.0], |w| [w[2], w[3]]))
+        .with_min_inner_size([760.0, 480.0]);
+    if let Some(w) = saved {
+        viewport = viewport.with_position([w[0].max(0.0), w[1].max(0.0)]);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("minivna")
-            .with_inner_size([1100.0, 760.0])
-            .with_min_inner_size([760.0, 480.0]),
+        viewport,
         // OpenGL runs on older graphics hardware where the default renderer draws wrongly.
         renderer: eframe::Renderer::Glow,
         ..Default::default()
@@ -401,6 +432,6 @@ pub fn run(port: PortChoice, settings: Settings, notice: Option<String>, sweep_a
     eframe::run_native(
         "minivna",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, port, settings, notice, sweep_at_start)))),
+        Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, port, settings, notice, sweep_at_start, store::calibration_path())))),
     )
 }

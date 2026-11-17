@@ -2,11 +2,13 @@
 
 use eframe::egui;
 
-use super::state::{parse_mhz, AppState, Big, Entry, Marker, UiMode};
+use super::state::{parse_decimal, parse_mhz, AppState, Big, Entry, Marker, UiMode};
 use super::text::t;
 use super::{color32, Action};
 
 const FIELD_WIDTH: f32 = 72.0;
+/// Wide enough for "2880.000000" (a frequency with the x16 extender).
+const FREQ_WIDTH: f32 = 94.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     ui.add_space(2.0);
@@ -24,16 +26,19 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
 
 /// A read-out field: a framed box in the field colour, so it stands out from the panel.
 fn value(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(FIELD_WIDTH, 18.0), egui::Sense::click());
+    value_wide(ui, text, FIELD_WIDTH)
+}
+
+/// A read-out field of at least `min_width`; it grows rather than cut its text.
+fn value_wide(ui: &mut egui::Ui, text: &str, min_width: f32) -> egui::Response {
+    let color = ui.visuals().strong_text_color();
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::monospace(12.0), color);
+    let width = min_width.max(galley.size().x + 10.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 18.0), egui::Sense::click());
     let visuals = ui.visuals();
     ui.painter().rect(rect, 2.0, visuals.extreme_bg_color, visuals.widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
-    ui.painter().text(
-        rect.right_center() - egui::vec2(4.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        text,
-        egui::FontId::monospace(12.0),
-        visuals.strong_text_color(),
-    );
+    let pos = egui::pos2(rect.right() - 5.0 - galley.size().x, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, color);
     response
 }
 
@@ -81,7 +86,7 @@ fn rows(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             let row = index.map(|i| state.marker_row(i)).unwrap_or_default();
-            if value(ui, &row[0]).on_hover_text(t("Double-click to type the frequency")).double_clicked() && index.is_some() {
+            if value_wide(ui, &row[0], FREQ_WIDTH).on_hover_text(t("Double-click to type the frequency")).double_clicked() && index.is_some() {
                 state.entry = Some((Entry::Freq(marker), row[0].clone()));
             }
             for text in &row[1..] {
@@ -97,7 +102,8 @@ fn rows(ui: &mut egui::Ui, state: &mut AppState) {
         swatch(ui, color32(colors.swr_min));
         ui.label("");
         let row = if state.show_swr_min { state.swr_min().map(|i| state.marker_row(i)) } else { None }.unwrap_or_default();
-        for text in &row {
+        value_wide(ui, &row[0], FREQ_WIDTH);
+        for text in &row[1..] {
             value(ui, text);
         }
         ui.label("");
@@ -152,7 +158,7 @@ fn cable_length(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Actio
             ui.end_row();
             ui.label(t("Velocity Factor"));
             ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut state.settings.velocity).range(0.1..=1.0).speed(0.005).fixed_decimals(2));
+                ui.add(egui::DragValue::new(&mut state.settings.velocity).range(0.1..=1.0).speed(0.005).fixed_decimals(2).custom_parser(parse_decimal));
                 if ui.small_button("?").on_hover_text(t("Usual Velocity Factors")).clicked() {
                     actions.push(Action::Open(super::Dialog::Velocity));
                 }

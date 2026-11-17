@@ -2,7 +2,7 @@
 
 use eframe::egui;
 
-use crate::ui::state::AppState;
+use crate::ui::state::{parse_decimal, AppState};
 use crate::ui::text::t;
 
 #[derive(Default)]
@@ -21,7 +21,7 @@ impl VelocityDialog {
                         if ui.button(t("Use")).clicked() {
                             chosen = Some(row.factor);
                         }
-                        ui.add(egui::DragValue::new(&mut row.factor).range(0.1..=1.0).speed(0.005).fixed_decimals(2));
+                        ui.add(egui::DragValue::new(&mut row.factor).range(0.1..=1.0).speed(0.005).fixed_decimals(2).custom_parser(parse_decimal));
                         ui.add(egui::TextEdit::singleline(&mut row.note).desired_width(260.0));
                         ui.end_row();
                     }

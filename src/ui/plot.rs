@@ -184,7 +184,8 @@ pub fn build(state: &AppState, colors: &Colors, width: f32, height_px: f32) -> V
         if tick > 0.0 && tick < scale {
             out.push(Prim::Line { points: across(y), color: colors.rl, width: 1.0, dashed: true });
         }
-        let label = tick - state.rl_offset_db;
+        // Rounded to a tenth, without a trailing ".0".
+        let label = ((tick - state.rl_offset_db) * 10.0).round() / 10.0 + 0.0;
         let text = if tick == 0.0 { format!("{label}dB") } else { format!("{label}") };
         out.push(Prim::Text { pos: [frame.left - 30.0, y - 6.0], text, color: colors.rl, anchor: Anchor::Right });
     }
@@ -392,5 +393,16 @@ mod tests {
                 assert!(points.iter().all(|p| p[0].is_finite() && p[1].is_finite()));
             }
         }
+    }
+
+    #[test]
+    fn loss_labels_are_rounded() {
+        let mut s = state();
+        s.rl_offset_db = 3.3;
+        let prims = build(&s, &s.settings.screen, 800.0, 500.0);
+        let texts: Vec<&str> = prims.iter().filter_map(|p| if let Prim::Text { text, .. } = p { Some(text.as_str()) } else { None }).collect();
+        assert!(texts.contains(&"-3.3dB"), "{texts:?}");
+        assert!(texts.contains(&"-0.3"), "{texts:?}");
+        assert!(texts.iter().all(|t| t.len() <= 12), "{texts:?}");
     }
 }

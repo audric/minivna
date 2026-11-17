@@ -17,6 +17,24 @@ had been closed by one minute of continuous sweeping and reopened. Four later ru
 repeat it (two identical sweeps also differ by at most 1 count). Not explained. Phase is not
 used by the calibration table.
 
+## Stopping a sweep half way (2026-11-17, afternoon)
+
+**The miniVNA must not be sent anything while it is still sending a sweep.** A first version
+of "Stop" sent the parking command 0.4 s into a 1000-point sweep. The next sweep came back
+garbled (levels 100..231 instead of 363..407), the one after got no answer, and the device
+then ignored everything, including single filler fields, until its USB cable was unplugged
+and plugged in again.
+
+The fix (`Device::drain`): after a stop, the rest of the interrupted sweep is read away
+before anything else is sent. With that, `examples/stoptest.rs` stopped a 1000-point sweep
+three times; each stop took 1.34 s (the device finishes its sweep, the result is thrown
+away) and each following 500-point sweep was normal (levels 363..407, phase 11..249).
+
+| Check | Expected | Measured | Result |
+|---|---|---|---|
+| Shorted DUT port against open port | phase near 180 degrees at low frequency instead of 0 | short: phase 1023 falling to 684 counts, level 348..354; open: phase 12 rising to 132, level 365..380 | pass |
+| Stop half way through a sweep, three times, then sweep | next sweep normal | see above | pass with `drain`; hangs the device without it |
+
 ## Still to do: each needs something connected
 
 | Check | Expected | Result |

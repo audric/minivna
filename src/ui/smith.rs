@@ -4,6 +4,7 @@
 
 use super::plot::{Anchor, Prim};
 use super::state::{field, AppState, UiMode};
+use super::text::t;
 use crate::calc::tools::swr_min_index;
 use crate::calc::Point;
 use crate::device::Mode;
@@ -127,15 +128,15 @@ pub fn build(state: &AppState, colors: &Colors, width: f32, height: f32) -> Vec<
     });
     out.push(line(rim.collect(), colors.frame, 1.5));
 
-    out.push(Prim::Text { pos: [6.0, 4.0], text: "Smith chart, 50 ohms".into(), color: colors.frame, anchor: Anchor::Left });
+    out.push(Prim::Text { pos: [6.0, 4.0], text: t("Smith chart, 50 ohms").into(), color: colors.frame, anchor: Anchor::Left });
     let note_at = [6.0, 20.0];
     if is_transmission(state) {
-        out.push(Prim::Text { pos: note_at, text: "The Smith chart needs a reflection sweep.".into(), color: colors.frame, anchor: Anchor::Left });
+        out.push(Prim::Text { pos: note_at, text: t("The Smith chart needs a reflection sweep.").into(), color: colors.frame, anchor: Anchor::Left });
         return out;
     }
     let signed = state.settings.signed_phase;
     if !signed {
-        let text = "Reactance sign not measured: upper half only (see Trace options).";
+        let text = t("Reactance sign not measured: upper half only (see Trace options).");
         out.push(Prim::Text { pos: note_at, text: text.into(), color: colors.frame, anchor: Anchor::Left });
     }
 
