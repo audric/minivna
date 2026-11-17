@@ -13,6 +13,7 @@ name = "minivna"
 path = "src/main.rs"
 
 [dependencies]
+directories = "6.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serialport = "4.10.1"
 thiserror = "2.0.21"
