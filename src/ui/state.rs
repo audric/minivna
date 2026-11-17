@@ -2,7 +2,9 @@
 //! The drawing modules only read this state and call these methods.
 
 use crate::cal::Calibration;
-use crate::calc::tools::{bandwidth_q, swr_min_index};
+use crate::calc::tools::{
+    bandwidth_q, cable_length_m, cable_loss, quarter_wave_crossings, refine_to_90, swr_min_index, velocity_from_length,
+};
 use crate::calc::Point;
 use crate::device::{Mode, SweepRequest, F_MAX_HZ, F_MIN_HZ};
 use crate::store::Settings;
@@ -31,6 +33,18 @@ pub enum Curve {
 
 impl Curve {
     pub const ALL: [Curve; 6] = [Curve::Swr, Curve::Z, Curve::Rl, Curve::Phase, Curve::Rs, Curve::Xs];
+}
+
+impl UiMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            UiMode::Antenna => "Antenna",
+            UiMode::CableLoss => "Cable Loss",
+            UiMode::CableLength => "Cable Length",
+            UiMode::Transmission => "Transmission",
+            UiMode::Generator => "Generator",
+        }
+    }
 }
 
 /// A frequency typed by the user, in MHz. Accepts a decimal point or a decimal comma.
@@ -85,8 +99,13 @@ pub struct AppState {
     pub zoom_stack: Vec<(u64, u64)>,
     /// The band preset last chosen, if the range still comes from it.
     pub current_band: Option<usize>,
-    /// The marker whose frequency is being typed, and the text so far.
-    pub entry: Option<(Marker, String)>,
+    /// A value being typed in the small entry window, and the text so far.
+    pub entry: Option<(Entry, String)>,
+    /// Put the markers on the band's default positions when the next sweep arrives.
+    band_markers_pending: bool,
+    first_result_seen: bool,
+    /// Which pass of the automatic cable-length search is running (0 = none).
+    auto_pass: u8,
 }
 
 impl AppState {
@@ -120,6 +139,9 @@ impl AppState {
             zoom_stack: Vec::new(),
             current_band: None,
             entry: None,
+            band_markers_pending: false,
+            first_result_seen: false,
+            auto_pass: 0,
         }
     }
 
@@ -209,6 +231,16 @@ impl AppState {
                 self.m2 = self.m2.map(|m| m.min(last));
                 self.result = Some(result);
                 self.status.clear();
+                if std::mem::take(&mut self.band_markers_pending) {
+                    self.marker_to_band_default(Marker::M1);
+                    self.marker_to_band_default(Marker::M2);
+                }
+                if !std::mem::replace(&mut self.first_result_seen, true)
+                    && self.settings.m1_at_start
+                    && self.m1.is_none()
+                {
+                    self.toggle_marker(Marker::M1);
+                }
             }
             Event::CalTable(..) => {}
             Event::Error(text) => {
@@ -219,9 +251,23 @@ impl AppState {
         }
     }
 
+    /// In transmission mode only loss and phase mean anything.
+    pub fn curve_available(&self, curve: Curve) -> bool {
+        self.mode != UiMode::Transmission || matches!(curve, Curve::Rl | Curve::Phase)
+    }
+
     pub fn step_text(&self) -> String {
         format!("(Step : {} Hz)", self.request().step_hz())
     }
+}
+
+/// What the small entry window is asking for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Entry {
+    /// A marker's frequency in MHz.
+    Freq(Marker),
+    /// A known cable length in metres, to work out the velocity factor.
+    Length,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -369,6 +415,135 @@ impl AppState {
     /// The point with the lowest SWR.
     pub fn swr_min(&self) -> Option<usize> {
         swr_min_index(self.points())
+    }
+}
+
+/// What the automatic cable-length search wants next.
+pub enum AutoLength {
+    NextSweep(SweepRequest),
+    Done,
+    Failed,
+}
+
+impl AppState {
+    /// Change mode. As in the original, both markers go to their home positions.
+    pub fn set_mode(&mut self, mode: UiMode) {
+        self.mode = mode;
+        if let Some(last) = self.points().len().checked_sub(1) {
+            self.m1 = Some((last as f64 / 3.0).round() as usize);
+            self.m2 = Some((last as f64 * 0.66).round() as usize);
+        }
+    }
+
+    /// A new range that does not come from zooming: forget the zoom history.
+    fn new_range(&mut self, start_hz: u64, stop_hz: u64) -> bool {
+        if !self.set_range(start_hz, stop_hz) {
+            return false;
+        }
+        self.zoom_stack.clear();
+        self.current_band = None;
+        true
+    }
+
+    /// Select a band preset. False if the band does not exist or cannot be reached
+    /// (for example 70 cm without a frequency extender).
+    pub fn apply_band(&mut self, index: usize) -> bool {
+        let Some(band) = self.settings.bands.get(index) else { return false };
+        let (start, stop) = ((band.start_mhz * 1e6).round() as u64, (band.stop_mhz * 1e6).round() as u64);
+        if !self.new_range(start, stop) {
+            return false;
+        }
+        self.current_band = Some(index);
+        self.band_markers_pending = self.settings.markers_from_band;
+        true
+    }
+
+    /// The whole range of the device: 1 to 180 MHz, times the extender.
+    pub fn apply_full_range(&mut self) {
+        let mult = self.extender as u64;
+        self.new_range(1_000_000 * mult, 180_000_000 * mult);
+    }
+
+    /// "160 - 10 m".
+    pub fn apply_hf_range(&mut self) {
+        self.new_range(1_700_000, 29_800_000);
+    }
+
+    /// Select a frequency extender (1 = none, 4, 8 or 16). The range becomes the full range.
+    pub fn set_extender(&mut self, mult: u8) {
+        if [1, 4, 8, 16].contains(&mult) {
+            self.extender = mult;
+            self.apply_full_range();
+        }
+    }
+
+    fn marker_points(&self) -> Option<(&Point, &Point)> {
+        let points = self.points();
+        Some((points.get(self.m1?)?, points.get(self.m2?)?))
+    }
+
+    /// Cable loss at the two markers: minimum, average, maximum, in dB.
+    pub fn cable_loss_fields(&self) -> Option<[String; 3]> {
+        let (a, b) = self.marker_points()?;
+        let loss = cable_loss(a.rl_db, b.rl_db);
+        Some([field(loss.min), field(loss.avg), field(loss.max)])
+    }
+
+    /// Cable length in metres from the two markers and the velocity factor.
+    pub fn cable_length_text(&self) -> Option<String> {
+        let (a, b) = self.marker_points()?;
+        cable_length_m(a.freq_hz, b.freq_hz, self.settings.velocity).map(field)
+    }
+
+    /// Work out the velocity factor from a known cable length and the two markers.
+    /// False if the markers are not set or the result is not a possible factor.
+    pub fn set_velocity_from_length(&mut self, length_m: f64) -> bool {
+        let Some((a, b)) = self.marker_points() else { return false };
+        match velocity_from_length(a.freq_hz, b.freq_hz, length_m) {
+            Some(v) if v > 0.0 && v <= 1.0 => {
+                self.settings.velocity = (v * 100.0).round() / 100.0;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn auto_length_running(&self) -> bool {
+        self.auto_pass != 0
+    }
+
+    /// Start the automatic cable-length search: a full sweep with the markers off.
+    pub fn auto_length_start(&mut self) -> SweepRequest {
+        self.apply_full_range();
+        self.samples = 500;
+        self.refresh_texts();
+        (self.m1, self.m2) = (None, None);
+        self.auto_pass = 1;
+        self.request()
+    }
+
+    /// Call after each sweep while the search runs. The first pass zooms onto one full phase
+    /// period (first to third 90 degree crossing); the second puts the markers on its ends.
+    pub fn auto_length_on_result(&mut self) -> AutoLength {
+        let pass = std::mem::take(&mut self.auto_pass);
+        let points = self.points();
+        let Some((first, third)) = quarter_wave_crossings(points).filter(|_| pass != 0) else {
+            return AutoLength::Failed;
+        };
+        if pass == 1 {
+            let (low, high) = self.limits_hz();
+            let start = (points[first].freq_hz as u64).saturating_sub(1_000_000).max(low);
+            let stop = (points[third].freq_hz as u64 + 1_000_000).min(high);
+            if !self.new_range(start, stop) {
+                return AutoLength::Failed;
+            }
+            self.auto_pass = 2;
+            AutoLength::NextSweep(self.request())
+        } else {
+            let (m1, m2) = (refine_to_90(points, first), refine_to_90(points, third));
+            (self.m1, self.m2) = (Some(m1), Some(m2));
+            AutoLength::Done
+        }
     }
 }
 
@@ -642,5 +817,149 @@ pub(crate) mod tests {
         let mut s = swept();
         s.result.as_mut().unwrap().points[77].swr = 1.05;
         assert_eq!(s.swr_min(), Some(77));
+    }
+
+    // ---- modes, bands, extender, cable (Task 11) ----
+
+    #[test]
+    fn mode_change_places_markers() {
+        let mut s = swept();
+        s.set_mode(UiMode::CableLoss);
+        assert_eq!(s.mode, UiMode::CableLoss);
+        assert_eq!((s.m1, s.m2), (Some(97), Some(191)));
+        let mut empty = state();
+        empty.set_mode(UiMode::Transmission);
+        assert_eq!((empty.m1, empty.m2), (None, None));
+    }
+
+    #[test]
+    fn band_sets_range_and_optional_markers() {
+        let mut s = swept();
+        assert!(s.apply_band(5));
+        assert_eq!((s.start_hz, s.stop_hz), (13_900_000, 14_500_000));
+        assert_eq!(s.current_band, Some(5));
+        s.on_event(Event::Sweep(fake_result(13_900_000, 14_500_000, 290)));
+        assert_eq!((s.m1, s.m2), (None, None));
+
+        s.settings.markers_from_band = true;
+        assert!(s.apply_band(5));
+        s.on_event(Event::Sweep(fake_result(13_900_000, 14_500_000, 290)));
+        let freq = |i: Option<usize>| s.result.as_ref().unwrap().points[i.unwrap()].freq_hz;
+        assert!((freq(s.m1) - 14.0e6).abs() < 2100.0);
+        assert!((freq(s.m2) - 14.35e6).abs() < 2100.0);
+        assert!(!s.apply_band(99));
+    }
+
+    #[test]
+    fn extender_bands_need_an_extender() {
+        let mut s = state();
+        assert!(!s.apply_band(13));
+        s.set_extender(4);
+        assert!(s.apply_band(13));
+        assert_eq!((s.start_hz, s.stop_hz), (429_000_000, 441_000_000));
+    }
+
+    #[test]
+    fn extender_resets_range() {
+        let mut s = state();
+        s.set_extender(8);
+        assert_eq!((s.extender, s.start_hz, s.stop_hz), (8, 8_000_000, 1_440_000_000));
+        s.set_extender(1);
+        assert_eq!((s.extender, s.start_hz, s.stop_hz), (1, 1_000_000, 180_000_000));
+        s.set_extender(3);
+        assert_eq!(s.extender, 1);
+    }
+
+    #[test]
+    fn preset_ranges() {
+        let mut s = state();
+        s.apply_hf_range();
+        assert_eq!((s.start_hz, s.stop_hz), (1_700_000, 29_800_000));
+        s.apply_full_range();
+        assert_eq!((s.start_hz, s.stop_hz), (1_000_000, 180_000_000));
+    }
+
+    #[test]
+    fn cable_loss_fields() {
+        let mut s = swept();
+        assert!(s.cable_loss_fields().is_none());
+        s.result.as_mut().unwrap().points[10].rl_db = 6.0;
+        s.result.as_mut().unwrap().points[20].rl_db = 4.0;
+        (s.m1, s.m2) = (Some(10), Some(20));
+        assert_eq!(s.cable_loss_fields(), Some(["2.00".to_string(), "2.50".to_string(), "3.00".to_string()]));
+    }
+
+    #[test]
+    fn cable_length_text() {
+        let mut s = swept();
+        s.settings.velocity = 0.67;
+        s.place_marker(Marker::M1, 10e6);
+        s.place_marker(Marker::M2, 21e6);
+        assert_eq!(s.cable_length_text().as_deref(), Some("9.09"));
+        s.m2 = s.m1;
+        assert_eq!(s.cable_length_text(), None);
+    }
+
+    #[test]
+    fn velocity_from_length() {
+        let mut s = swept();
+        s.place_marker(Marker::M1, 10e6);
+        s.place_marker(Marker::M2, 20e6);
+        assert!(s.set_velocity_from_length(10.0));
+        assert_eq!(s.settings.velocity, 0.67);
+        assert!(!s.set_velocity_from_length(1000.0)); // would need a factor above 1
+        assert_eq!(s.settings.velocity, 0.67);
+    }
+
+    #[test]
+    fn m1_can_be_switched_on_with_the_first_result() {
+        let mut s = state();
+        s.settings.m1_at_start = true;
+        s.on_event(Event::Sweep(fake_result(1_000_000, 30_000_000, 290)));
+        assert_eq!(s.m1, Some(97));
+        s.m1 = None;
+        s.on_event(Event::Sweep(fake_result(1_000_000, 30_000_000, 290)));
+        assert_eq!(s.m1, None);
+    }
+
+    /// A cable-like result: phase is 90 degrees at 20, 40, 60 ... MHz.
+    fn cable_result(start: u64, stop: u64) -> SweepResult {
+        let mut r = fake_result(start, stop, 500);
+        for p in &mut r.points {
+            let t = ((p.freq_hz - 10e6) / 40e6).rem_euclid(1.0);
+            p.phase_deg = 180.0 * (2.0 * t - 1.0).abs();
+        }
+        r
+    }
+
+    #[test]
+    fn auto_length_two_passes() {
+        let mut s = swept();
+        (s.m1, s.m2) = (Some(3), Some(4));
+        let first = s.auto_length_start();
+        assert_eq!((first.start_hz, first.stop_hz, first.samples), (1_000_000, 180_000_000, 500));
+        assert_eq!((s.m1, s.m2), (None, None));
+
+        s.on_event(Event::Sweep(cable_result(1_000_000, 180_000_000)));
+        let AutoLength::NextSweep(second) = s.auto_length_on_result() else { panic!("expected a second sweep") };
+        assert!((18_000_000..19_600_000).contains(&second.start_hz), "{}", second.start_hz);
+        assert!((60_000_000..61_600_000).contains(&second.stop_hz), "{}", second.stop_hz);
+
+        s.on_event(Event::Sweep(cable_result(second.start_hz, second.stop_hz)));
+        assert!(matches!(s.auto_length_on_result(), AutoLength::Done));
+        let freq = |i: Option<usize>| s.result.as_ref().unwrap().points[i.unwrap()].freq_hz;
+        assert!((freq(s.m1) - 20e6).abs() < 150_000.0, "{}", freq(s.m1));
+        assert!((freq(s.m2) - 60e6).abs() < 150_000.0, "{}", freq(s.m2));
+        assert!(!s.auto_length_running());
+    }
+
+    #[test]
+    fn auto_length_fails_without_crossings() {
+        let mut s = swept();
+        s.auto_length_start();
+        s.on_event(Event::Sweep(fake_result(1_000_000, 180_000_000, 500)));
+        assert!(matches!(s.auto_length_on_result(), AutoLength::Failed));
+        assert!(!s.auto_length_running());
+        assert!(matches!(s.auto_length_on_result(), AutoLength::Failed));
     }
 }

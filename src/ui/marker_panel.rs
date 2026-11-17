@@ -2,18 +2,22 @@
 
 use eframe::egui;
 
-use super::state::{parse_mhz, AppState, Marker};
+use super::state::{parse_mhz, AppState, Entry, Marker, UiMode};
 use super::text::t;
 use super::{color32, Action};
 
 const FIELD_WIDTH: f32 = 72.0;
 
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, _actions: &mut Vec<Action>) {
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         rows(ui, state);
         ui.separator();
-        between_markers(ui, state);
+        match state.mode {
+            UiMode::CableLoss => cable_loss(ui, state),
+            UiMode::CableLength => cable_length(ui, state, actions),
+            _ => between_markers(ui, state),
+        }
     });
     ui.add_space(2.0);
 }
@@ -42,7 +46,8 @@ fn rows(ui: &mut egui::Ui, state: &mut AppState) {
             Some((false, ..)) => "Xc pF",
             None => "---",
         };
-        for header in ["", "", "", "Frequency", "SWR", "| Z |", "R.L.", "Phase", "Rs", xs_header, last_header] {
+        let loss_header = if state.mode == UiMode::Transmission { "T.L." } else { "R.L." };
+        for header in ["", "", "", "Frequency", "SWR", "| Z |", loss_header, "Phase", "Rs", xs_header, last_header] {
             ui.label(t_dynamic(header));
         }
         ui.end_row();
@@ -67,7 +72,7 @@ fn rows(ui: &mut egui::Ui, state: &mut AppState) {
             });
             let row = index.map(|i| state.marker_row(i)).unwrap_or_default();
             if value(ui, &row[0]).on_hover_text(t("Double-click to type the frequency")).double_clicked() && index.is_some() {
-                state.entry = Some((marker, row[0].clone()));
+                state.entry = Some((Entry::Freq(marker), row[0].clone()));
             }
             for text in &row[1..] {
                 value(ui, text);
@@ -104,17 +109,61 @@ fn between_markers(ui: &mut egui::Ui, state: &AppState) {
     });
 }
 
+fn cable_loss(ui: &mut egui::Ui, state: &AppState) {
+    let [min, avg, max] = state.cable_loss_fields().unwrap_or_default();
+    ui.vertical(|ui| {
+        ui.label(t("Cable loss dB"));
+        egui::Grid::new("cable loss").num_columns(2).show(ui, |ui| {
+            for (name, text) in [(t("Min."), &min), (t("Avg."), &avg), (t("Max."), &max)] {
+                ui.label(name);
+                value(ui, text);
+                ui.end_row();
+            }
+        });
+    });
+}
+
+fn cable_length(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) {
+    ui.vertical(|ui| {
+        egui::Grid::new("cable length").num_columns(2).show(ui, |ui| {
+            ui.label(t("Meters"));
+            value(ui, &state.cable_length_text().unwrap_or_default());
+            ui.end_row();
+            ui.label(t("Velocity Factor"));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut state.settings.velocity).range(0.1..=1.0).speed(0.005).fixed_decimals(2));
+                if ui.small_button("?").on_hover_text(t("Usual Velocity Factors")).clicked() {
+                    actions.push(Action::Open(super::Dialog::Velocity));
+                }
+            });
+            ui.end_row();
+        });
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!state.busy, egui::Button::new(t("Find automatically"))).clicked() {
+                actions.push(Action::AutoLength);
+            }
+            if ui.button(t("L (m) -> Velo.")).clicked() {
+                state.entry = Some((Entry::Length, String::new()));
+            }
+        });
+    });
+}
+
 /// Like `t`, for texts chosen at run time from a fixed set.
 fn t_dynamic(text: &str) -> String {
     text.to_string()
 }
 
-/// The small window for typing a marker's frequency.
+/// The small window for typing a marker's frequency or a cable length.
 pub fn entry_dialog(ctx: &egui::Context, state: &mut AppState) {
-    let Some((marker, mut text)) = state.entry.take() else { return };
+    let Some((kind, mut text)) = state.entry.take() else { return };
+    let title = match kind {
+        Entry::Freq(_) => t("Frequency in MHz"),
+        Entry::Length => t("Cable length in meters"),
+    };
     let mut keep = true;
     let mut apply = false;
-    egui::Window::new(t("Frequency in MHz"))
+    egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -132,10 +181,17 @@ pub fn entry_dialog(ctx: &egui::Context, state: &mut AppState) {
             });
         });
     if apply {
-        if let Some(mhz) = parse_mhz(&text) {
-            state.place_marker(marker, mhz * 1e6);
+        // parse_mhz accepts any plain positive number, with a point or a comma.
+        match (kind, parse_mhz(&text)) {
+            (Entry::Freq(marker), Some(mhz)) => state.place_marker(marker, mhz * 1e6),
+            (Entry::Length, Some(metres)) => {
+                if !state.set_velocity_from_length(metres) {
+                    state.status = t("That length does not fit the two markers.").to_string();
+                }
+            }
+            (_, None) => {}
         }
     } else if keep {
-        state.entry = Some((marker, text));
+        state.entry = Some((kind, text));
     }
 }

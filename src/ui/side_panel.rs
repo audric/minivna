@@ -70,7 +70,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
     let colors = state.settings.screen.clone();
     for (i, curve) in Curve::ALL.into_iter().enumerate() {
         ui.horizontal(|ui| {
-            ui.checkbox(&mut state.show[i], curve_name(curve));
+            let available = state.curve_available(curve);
+            ui.add_enabled(available, egui::Checkbox::new(&mut state.show[i], curve_name(curve)));
             let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, 0.0, color32(curve_color(&colors, curve)));
         });

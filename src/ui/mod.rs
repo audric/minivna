@@ -8,12 +8,13 @@ use crate::sweep::{self, Command, PortChoice, Worker};
 
 pub mod graph;
 pub mod marker_panel;
+pub mod menu;
 pub mod plot;
 pub mod side_panel;
 pub mod state;
 pub mod text;
 
-use state::AppState;
+use state::{AppState, AutoLength, UiMode};
 
 /// Something the user asked for that needs the sweep worker.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,6 +26,24 @@ pub enum Action {
     Zoom,
     /// Go back to the range before the last zoom.
     Unzoom,
+    SetMode(UiMode),
+    Band(usize),
+    FullRange,
+    HfRange,
+    Extender(u8),
+    /// Switch the estimate of the sign of phase and reactance on or off.
+    SetSigned(bool),
+    /// Start the automatic cable-length search.
+    AutoLength,
+    Open(Dialog),
+    Quit,
+}
+
+/// The windows that can be opened from the menus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dialog {
+    About,
+    Velocity,
 }
 
 pub fn color32(c: Rgb) -> egui::Color32 {
@@ -37,6 +56,9 @@ pub struct App {
     port: PortChoice,
     /// Run one sweep as soon as the window is up (`--sweep` on the command line).
     sweep_at_start: bool,
+    about_open: bool,
+    title: String,
+    quit: bool,
 }
 
 impl App {
@@ -50,7 +72,7 @@ impl App {
         let mut state = AppState::new(settings, calibration);
         let _ = worker.tx.send(Command::SetSigned(state.settings.signed_phase));
         state.status = notice.or(cal_notice).unwrap_or_default();
-        App { state, worker, port, sweep_at_start }
+        App { state, worker, port, sweep_at_start, about_open: false, title: String::new(), quit: false }
     }
 
     fn send(&self, command: Command) {
@@ -87,11 +109,51 @@ impl App {
                     self.apply(Action::SweepOnce);
                 }
             }
+            Action::SetMode(mode) => self.state.set_mode(mode),
+            Action::Band(index) => {
+                if self.state.apply_band(index) {
+                    self.apply(Action::SweepOnce);
+                }
+            }
+            Action::FullRange => {
+                self.state.apply_full_range();
+                self.apply(Action::SweepOnce);
+            }
+            Action::HfRange => {
+                self.state.apply_hf_range();
+                self.apply(Action::SweepOnce);
+            }
+            Action::Extender(mult) => self.state.set_extender(mult),
+            Action::SetSigned(signed) => {
+                self.state.settings.signed_phase = signed;
+                self.send(Command::SetSigned(signed));
+                if let Some(r) = self.state.result.take() {
+                    self.state.result = Some(sweep::build_result(r.request, r.raw, r.cal, signed));
+                }
+            }
+            Action::AutoLength => {
+                if !self.state.busy {
+                    let request = self.state.auto_length_start();
+                    self.send(Command::Single(request));
+                }
+            }
+            Action::Open(Dialog::About) => self.about_open = true,
+            Action::Open(Dialog::Velocity) => {}
+            Action::Quit => self.quit = true,
         }
     }
 }
 
 impl App {
+    /// The title bar names the mode and the port, as the original does.
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let title = format!("minivna - Mode : {} ( {} )", self.state.mode.name(), self.port_name());
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+    }
+
     /// Space = one sweep, F12 = continuous, Esc = stop. Ignored while a text box has the keyboard.
     fn keys(&self, ui: &egui::Ui, actions: &mut Vec<Action>) {
         let typing = ui.ctx().text_edit_focused();
@@ -112,13 +174,30 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         while let Ok(event) = self.worker.rx.try_recv() {
+            let is_sweep = matches!(event, sweep::Event::Sweep(_));
+            let failed = matches!(event, sweep::Event::Error(_));
             self.state.on_event(event);
+            if self.state.auto_length_running() && (is_sweep || failed) {
+                match self.state.auto_length_on_result() {
+                    AutoLength::NextSweep(request) => self.send(Command::Single(request)),
+                    AutoLength::Done => {}
+                    AutoLength::Failed if failed => {}
+                    AutoLength::Failed => self.state.status = text::t("!!! No cable found: the phase does not pass 90 degrees three times.").to_string(),
+                }
+            }
+        }
+        self.update_title(ui.ctx());
+        if self.quit {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
         let mut actions = Vec::new();
         if std::mem::take(&mut self.sweep_at_start) {
             actions.push(Action::SweepOnce);
         }
 
+        egui::Panel::top("menu").show(ui, |ui| {
+            menu::show(ui, &mut self.state, &mut actions);
+        });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(self.port_name());
@@ -139,6 +218,8 @@ impl eframe::App for App {
         });
 
         marker_panel::entry_dialog(ui.ctx(), &mut self.state);
+        menu::about(ui.ctx(), &mut self.about_open);
+        menu::shortcuts(ui, &self.state, &mut actions);
         self.keys(ui, &mut actions);
 
         for action in actions {

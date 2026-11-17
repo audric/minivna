@@ -188,8 +188,8 @@ pub fn build(state: &AppState, colors: &Colors, width: f32, height_px: f32) -> V
     // Legend along the top, visible curves only.
     let mut x = frame.left + 4.0;
     for (curve, shown) in Curve::ALL.into_iter().zip(state.show) {
-        if shown {
-            let name = curve_name(curve);
+        if shown && state.curve_available(curve) {
+            let name = if curve == Curve::Rl && !state.curve_available(Curve::Swr) { "T.L." } else { curve_name(curve) };
             out.push(Prim::Text { pos: [x, 4.0], text: name.into(), color: curve_color(colors, curve), anchor: Anchor::Left });
             x += 12.0 + 7.0 * name.len() as f32;
         }
@@ -198,7 +198,7 @@ pub fn build(state: &AppState, colors: &Colors, width: f32, height_px: f32) -> V
     if let Some(result) = &state.result {
         let line_width = if state.settings.thick_lines { 2.5 } else { 1.2 };
         for (curve, shown) in Curve::ALL.into_iter().zip(state.show) {
-            if !shown {
+            if !shown || !state.curve_available(curve) {
                 continue;
             }
             let points = result
