@@ -11,7 +11,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
     ui.set_width(150.0);
     ui.add_space(4.0);
 
-    ui.add_enabled_ui(!state.busy, |ui| {
+    ui.add_enabled_ui(!state.busy && !state.device_held, |ui| {
         if ui.add_sized([140.0, 26.0], egui::Button::new(t("x Sweep"))).clicked() {
             actions.push(Action::SweepContinuous);
         }
@@ -51,8 +51,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
         committed |= edit(ui, &mut state.samples_text);
         ui.end_row();
     });
-    if committed {
-        state.commit_range();
+    // A running continuous sweep takes the new range at once.
+    if committed && state.commit_range() && state.continuous {
+        actions.push(Action::SweepOnce);
     }
     ui.small(state.step_text());
     ui.add_enabled_ui(!state.busy, |ui| {
@@ -97,5 +98,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
 
 /// A small text box. True when the user finished editing it.
 fn edit(ui: &mut egui::Ui, text: &mut String) -> bool {
-    ui.add(egui::TextEdit::singleline(text).desired_width(62.0)).lost_focus()
+    // A fixed size: inside a grid a text box otherwise shrinks to the column's 40 pixels.
+    ui.add_sized([88.0, 20.0], egui::TextEdit::singleline(text)).lost_focus()
 }

@@ -3,6 +3,9 @@
 
 use std::path::Path;
 
+use super::text::t;
+use crate::device::RequestError;
+
 use crate::cal::{CalError, Calibration, CAL_POINTS};
 use crate::calc::tools::{
     bandwidth_q, cable_length_m, cable_loss, quarter_wave_crossings, refine_to_90, swr_min_index, velocity_from_length,
@@ -106,6 +109,8 @@ pub struct AppState {
     /// A value being typed in the small entry window, and the text so far.
     pub entry: Option<(Entry, String)>,
     pub view: View,
+    /// The generator or the oscillator calibration is using the device: no sweeps, no mode change.
+    pub device_held: bool,
     /// Size of the graph on screen in pixels, for saving it as a picture.
     pub graph_size: [u32; 2],
     /// The row shown as a large banner on the graph (the original's "Visual" boxes).
@@ -151,6 +156,7 @@ impl AppState {
             big: None,
             graph_size: [0, 0],
             view: View::Graph,
+            device_held: false,
             band_markers_pending: false,
             first_result_seen: false,
             auto_pass: 0,
@@ -162,7 +168,12 @@ impl AppState {
     }
 
     fn range_is_valid(&self, start_hz: u64, stop_hz: u64, samples: u16) -> bool {
-        SweepRequest { start_hz, stop_hz, samples, ..self.request() }.validate().is_ok()
+        self.range_error(start_hz, stop_hz, samples).is_none()
+    }
+
+    /// Why a range cannot be swept, if it cannot.
+    fn range_error(&self, start_hz: u64, stop_hz: u64, samples: u16) -> Option<RequestError> {
+        SweepRequest { start_hz, stop_hz, samples, ..self.request() }.validate().err()
     }
 
     /// Apply the three text boxes. Anything invalid or out of range puts the previous
@@ -173,16 +184,22 @@ impl AppState {
         let typed = |text: &str| {
             parse_mhz(text).map(|mhz| (mhz * 1e6).round() as u64).filter(|hz| (low..=high).contains(hz))
         };
-        let start = typed(&self.start_text).unwrap_or(self.start_hz);
-        let stop = typed(&self.stop_text).unwrap_or(self.stop_hz);
-        let samples = match self.samples_text.trim().parse::<u32>() {
-            Ok(n) => n.clamp(10, 1000) as u16,
-            Err(_) => self.samples,
-        };
-        if self.range_is_valid(start, stop, samples) {
+        let (typed_start, typed_stop) = (typed(&self.start_text), typed(&self.stop_text));
+        let start = typed_start.unwrap_or(self.start_hz);
+        let stop = typed_stop.unwrap_or(self.stop_hz);
+        let typed_samples = self.samples_text.trim().parse::<u32>().ok();
+        let samples = typed_samples.map_or(self.samples, |n| n.clamp(10, 1000) as u16);
+        // Anything refused goes back to the old value, and the status bar says why.
+        if let Some(why) = self.range_error(start, stop, samples) {
+            self.status = format!("!!! {why}");
+            if self.range_is_valid(self.start_hz, self.stop_hz, samples) {
+                self.samples = samples;
+            }
+        } else {
             (self.start_hz, self.stop_hz, self.samples) = (start, stop, samples);
-        } else if self.range_is_valid(self.start_hz, self.stop_hz, samples) {
-            self.samples = samples;
+            if typed_start.is_none() || typed_stop.is_none() || typed_samples.is_none() {
+                self.status = format!("!!! {} {} - {} MHz", t("Not a usable value. Frequencies:"), low as f64 / 1e6, high as f64 / 1e6);
+            }
         }
         self.refresh_texts();
         (self.start_hz, self.stop_hz, self.samples) != before
@@ -241,9 +258,11 @@ impl AppState {
                 let last = result.points.len().saturating_sub(1);
                 self.m1 = self.m1.map(|m| m.min(last));
                 self.m2 = self.m2.map(|m| m.min(last));
-                self.result = Some(result);
                 self.status.clear();
-                if std::mem::take(&mut self.band_markers_pending) {
+                // Only the band's own sweep: one of the old range may still have been under way.
+                let own = result.request.start_hz == self.start_hz && result.request.stop_hz == self.stop_hz;
+                self.result = Some(result);
+                if own && std::mem::take(&mut self.band_markers_pending) {
                     self.marker_to_band_default(Marker::M1);
                     self.marker_to_band_default(Marker::M2);
                 }
@@ -271,6 +290,14 @@ impl AppState {
     pub fn step_text(&self) -> String {
         format!("(Step : {} Hz)", self.request().step_hz())
     }
+}
+
+/// What asking for a sweep leads to right now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SweepKind {
+    Once,
+    /// A continuous sweep is running: restart it with the present settings.
+    Continuous,
 }
 
 /// What the central area shows.
@@ -384,9 +411,11 @@ impl AppState {
         let (Some(pa), Some(pb)) = (points.get(a), points.get(b)) else { return false };
         let (low, high) = (pa.freq_hz.min(pb.freq_hz) as u64, pa.freq_hz.max(pb.freq_hz) as u64);
         let before = (self.start_hz, self.stop_hz);
-        if !self.set_range(low, high) {
+        if let Some(why) = self.range_error(low, high, self.samples) {
+            self.status = format!("!!! {why}");
             return false;
         }
+        self.set_range(low, high);
         self.zoom_stack.push(before);
         self.current_band = None;
         true
@@ -468,11 +497,32 @@ pub enum AutoLength {
 
 impl AppState {
     /// Change mode. As in the original, both markers go to their home positions.
-    pub fn set_mode(&mut self, mode: UiMode) {
+    /// Refused (with a message) while the generator holds the device, and the generator
+    /// cannot start while a sweep is running.
+    pub fn set_mode(&mut self, mode: UiMode) -> bool {
+        if self.device_held {
+            self.status = t("Close the generator window first.").to_string();
+            return false;
+        }
+        if mode == UiMode::Generator && self.busy {
+            self.status = t("Stop the sweep before using the generator.").to_string();
+            return false;
+        }
         self.mode = mode;
         if let Some(last) = self.points().len().checked_sub(1) {
             self.m1 = Some((last as f64 / 3.0).round() as usize);
             self.m2 = Some((last as f64 * 0.66).round() as usize);
+        }
+        true
+    }
+
+    /// What a request for a sweep should do now; `None` means it has to wait.
+    pub fn sweep_kind(&self) -> Option<SweepKind> {
+        match (self.device_held, self.busy, self.continuous) {
+            (true, ..) => None,
+            (false, false, _) => Some(SweepKind::Once),
+            (false, true, true) => Some(SweepKind::Continuous),
+            (false, true, false) => None,
         }
     }
 
@@ -1262,5 +1312,85 @@ pub(crate) mod tests {
         assert!(s.settings.bands[5].needs_extender);
         assert!(s.set_band_field(5, BandField::Stop, "14.5"));
         assert!(!s.settings.bands[5].needs_extender);
+    }
+
+    // ---- findings of the final review ----
+
+    #[test]
+    fn a_refused_range_says_why() {
+        let mut s = state();
+        (s.start_text, s.stop_text, s.samples_text) = ("7".into(), "7.0001".into(), "500".into());
+        assert!(!s.commit_range());
+        assert!(s.status.contains("too narrow"), "{:?}", s.status);
+        assert_eq!((s.start_hz, s.stop_hz), (1_000_000, 180_000_000));
+
+        s.status.clear();
+        (s.start_text, s.stop_text) = ("20".into(), "10".into());
+        assert!(!s.commit_range());
+        assert!(s.status.contains("not valid"), "{:?}", s.status);
+
+        s.status.clear();
+        s.start_text = "abc".into();
+        assert!(!s.commit_range());
+        assert!(!s.status.is_empty());
+
+        s.status.clear();
+        (s.start_text, s.stop_text) = ("3,5".into(), "4".into());
+        assert!(s.commit_range());
+        assert!(s.status.is_empty());
+    }
+
+    #[test]
+    fn a_refused_zoom_says_why() {
+        let mut s = swept();
+        s.samples = 1000;
+        {
+            let points = &mut s.result.as_mut().unwrap().points;
+            (points[10].freq_hz, points[11].freq_hz) = (7_000_000.0, 7_000_500.0);
+        }
+        (s.m1, s.m2) = (Some(10), Some(11));
+        assert!(!s.zoom_to_markers());
+        assert!(s.status.contains("too narrow"), "{:?}", s.status);
+    }
+
+    #[test]
+    fn what_a_sweep_request_does_depends_on_the_device() {
+        let mut s = state();
+        assert_eq!(s.sweep_kind(), Some(SweepKind::Once));
+        s.busy = true; // a single sweep is running: wait for it
+        assert_eq!(s.sweep_kind(), None);
+        s.continuous = true; // a continuous sweep follows the new settings
+        assert_eq!(s.sweep_kind(), Some(SweepKind::Continuous));
+        s.device_held = true; // the generator has the device
+        assert_eq!(s.sweep_kind(), None);
+        (s.busy, s.continuous) = (false, false);
+        assert_eq!(s.sweep_kind(), None);
+    }
+
+    #[test]
+    fn the_mode_cannot_change_under_the_generator() {
+        let mut s = swept();
+        s.device_held = true;
+        assert!(!s.set_mode(UiMode::CableLoss));
+        assert_eq!(s.mode, UiMode::Antenna);
+        assert!(!s.status.is_empty());
+        s.device_held = false;
+        s.busy = true;
+        assert!(!s.set_mode(UiMode::Generator)); // cannot take the device from a running sweep
+        assert!(s.set_mode(UiMode::CableLoss));
+    }
+
+    #[test]
+    fn band_markers_wait_for_the_bands_own_sweep() {
+        let mut s = swept();
+        s.settings.markers_from_band = true;
+        assert!(s.apply_band(5));
+        // A sweep of the old range that was still under way arrives first.
+        s.on_event(Event::Sweep(fake_result(1_000_000, 30_000_000, 290)));
+        assert_eq!((s.m1, s.m2), (None, None));
+        s.on_event(Event::Sweep(fake_result(13_900_000, 14_500_000, 290)));
+        let freq = |i: Option<usize>| s.result.as_ref().unwrap().points[i.unwrap()].freq_hz;
+        assert!((freq(s.m1) - 14.0e6).abs() < 2100.0);
+        assert!((freq(s.m2) - 14.35e6).abs() < 2100.0);
     }
 }

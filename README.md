@@ -15,6 +15,7 @@ oscillator calibration, and saving a sweep as a `.mvna` file, CSV (ZPlots layout
     minivna            # uses the saved port, or searches for the device
     minivna --sim      # a simulated antenna at 14.1 MHz, no device needed
     minivna --smith    # start on the Smith chart
+    minivna --sweep    # make one sweep right after starting
 
 Calibrate once before measuring: *Configure → Calibrate Reflection*, with nothing
 connected between DUT and DET.
@@ -40,11 +41,14 @@ by itself; otherwise get it from ftdichip.com).
 | Ctrl+A / P / L / T / G | mode: antenna, cable loss, cable length, transmission, generator |
 | Ctrl+D / Ctrl+F | 160–10 m / 1–180 MHz |
 | Ctrl+O / Ctrl+S / Ctrl+Q | open / save / exit |
+| Ctrl+C / Ctrl+N | save as CSV / save graph as PNG |
+
+The shortcuts do not act while the cursor is in a text box.
 
 ## Where things are stored
 
 Settings (`settings.toml`) and calibration (`calibration.toml`) are in the per-user
-configuration folder: `~/.config/minivna/` on Linux, `%APPDATA%\minivna\` on Windows,
+configuration folder: `~/.config/minivna/` on Linux, `%APPDATA%\minivna\config\` on Windows,
 `~/Library/Application Support/minivna/` on macOS. Both are plain text.
 
 ## Building

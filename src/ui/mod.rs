@@ -17,6 +17,8 @@ pub mod side_panel;
 pub mod smith;
 pub mod state;
 pub mod text;
+#[cfg(test)]
+mod ui_tests;
 
 use state::{AppState, AutoLength, UiMode};
 
@@ -139,15 +141,17 @@ impl App {
 
     fn apply(&mut self, action: Action) {
         match action {
-            Action::SweepOnce | Action::SweepContinuous if self.state.busy => {}
-            Action::SweepOnce => {
+            // A running continuous sweep takes over new settings (range, band, mode);
+            // a single sweep in progress, or the generator, makes the request wait.
+            Action::SweepOnce | Action::SweepContinuous => {
+                let Some(kind) = self.state.sweep_kind() else { return };
                 self.state.commit_range();
-                self.send(Command::Single(self.state.request()));
-            }
-            Action::SweepContinuous => {
-                self.state.commit_range();
-                self.state.continuous = true;
-                self.send(Command::Continuous(self.state.request()));
+                if kind == state::SweepKind::Continuous || matches!(action, Action::SweepContinuous) {
+                    self.state.continuous = true;
+                    self.send(Command::Continuous(self.state.request()));
+                } else {
+                    self.send(Command::Single(self.state.request()));
+                }
             }
             Action::Stop => self.send(Command::Stop),
             Action::Zoom => {
@@ -161,11 +165,17 @@ impl App {
                 }
             }
             Action::SetMode(mode) => {
-                self.state.set_mode(mode);
-                if mode == UiMode::Generator && !self.state.busy {
+                self.sync_device_held();
+                if !self.state.set_mode(mode) {
+                    return;
+                }
+                if mode == UiMode::Generator {
                     let mut more = Vec::new();
                     self.dialogs.generator.open(&self.state, &mut more);
                     more.into_iter().for_each(|a| self.apply(a));
+                } else if self.state.continuous {
+                    // Reflection or transmission may have changed under a running sweep.
+                    self.apply(Action::SweepOnce);
                 }
             }
             Action::Band(index) => {
@@ -181,7 +191,12 @@ impl App {
                 self.state.apply_hf_range();
                 self.apply(Action::SweepOnce);
             }
-            Action::Extender(mult) => self.state.set_extender(mult),
+            Action::Extender(mult) => {
+                self.state.set_extender(mult);
+                if self.state.continuous {
+                    self.apply(Action::SweepOnce);
+                }
+            }
             Action::SetSigned(signed) => {
                 self.state.settings.signed_phase = signed;
                 self.send(Command::SetSigned(signed));
@@ -225,6 +240,11 @@ impl App {
 }
 
 impl App {
+    /// The generator and the oscillator calibration keep the device to themselves.
+    fn sync_device_held(&mut self) {
+        self.state.device_held = self.dialogs.generator.open || self.dialogs.dds.open;
+    }
+
     /// Ask for a file name and do what the File menu item says. Problems go to the status bar.
     fn file(&mut self, action: FileAction) {
         let dialog = rfd::FileDialog::new();
@@ -350,13 +370,15 @@ impl eframe::App for App {
         menu::shortcuts(ui, &self.state, &mut actions);
         self.keys(ui, &mut actions);
 
+        self.sync_device_held();
         for action in actions {
             self.apply(action);
         }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.send(Command::Shutdown);
+        // Wait for the worker to park the device, so that the output is not left running.
+        self.worker.shutdown(std::time::Duration::from_secs(3));
         self.state.settings.start_mhz = self.state.start_hz as f64 / 1e6 / self.state.extender as f64;
         self.state.settings.stop_mhz = self.state.stop_hz as f64 / 1e6 / self.state.extender as f64;
         self.state.settings.samples = self.state.samples;

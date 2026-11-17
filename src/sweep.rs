@@ -49,6 +49,25 @@ pub enum Event {
 pub struct Worker {
     pub tx: Sender<Command>,
     pub rx: Receiver<Event>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Worker {
+    /// Tell the worker to stop and park the device, and wait until it has done so.
+    /// False if it did not finish within `patience` (for example a reply that never comes).
+    pub fn shutdown(&mut self, patience: Duration) -> bool {
+        let _ = self.tx.send(Command::Shutdown);
+        let Some(thread) = self.thread.take() else { return true };
+        let deadline = std::time::Instant::now() + patience;
+        while !thread.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                self.thread = Some(thread);
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        thread.join().is_ok()
+    }
 }
 
 /// Compute a result from raw readings. Also used when a saved sweep is loaded.
@@ -64,11 +83,11 @@ pub fn build_result(request: SweepRequest, raw: Vec<RawPoint>, cal: Vec<i16>, si
 pub fn spawn(port: PortChoice, cal: Calibration, wake: Box<dyn Fn() + Send>) -> Worker {
     let (tx, commands) = mpsc::channel();
     let (events, rx) = mpsc::channel();
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("minivna-sweep".into())
         .spawn(move || Runner { port, cal, signed: false, device: None, commands, events, wake }.run())
         .expect("cannot start the sweep thread");
-    Worker { tx, rx }
+    Worker { tx, rx, thread: Some(thread) }
 }
 
 type AnyDevice = Device<Box<dyn Transport>>;
@@ -359,5 +378,13 @@ mod tests {
         let signed = build_result(r, got.raw.clone(), got.cal.clone(), true);
         assert!(signed.points.iter().any(|p| p.phase_deg < 0.0));
         assert!(signed.points.iter().any(|p| p.phase_deg > 0.0));
+    }
+
+    #[test]
+    fn shutdown_waits_for_the_worker_to_finish() {
+        let mut w = spawn(PortChoice::Simulated, Calibration::default(), Box::new(|| {}));
+        w.tx.send(Command::Continuous(req(1_000_000, 30_000_000, 100))).unwrap();
+        assert!(w.shutdown(Duration::from_secs(5)));
+        assert!(w.tx.send(Command::Park).is_err(), "the worker should be gone");
     }
 }

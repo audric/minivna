@@ -31,18 +31,26 @@ impl BandsDialog {
                     }
                     ui.end_row();
                     for band in 0..state.settings.bands.len() {
-                        ui.add(egui::TextEdit::singleline(&mut state.settings.bands[band].name).desired_width(110.0));
+                        // Fixed sizes: inside a grid a text box otherwise shrinks to 40 pixels.
+                        ui.add_sized([120.0, 20.0], egui::TextEdit::singleline(&mut state.settings.bands[band].name));
                         for (column, field) in FIELDS.into_iter().enumerate() {
                             let mut text = match &self.editing {
                                 Some((b, c, text)) if (*b, *c) == (band, column) => text.clone(),
                                 _ => shown(state, band, column),
                             };
-                            let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(70.0));
+                            let response = ui.add_sized([76.0, 20.0], egui::TextEdit::singleline(&mut text));
                             if response.lost_focus() {
                                 // A cell that is not a usable frequency goes back to its old value.
                                 state.set_band_field(band, field, &text);
-                                self.editing = None;
+                                if matches!(&self.editing, Some((b, c, _)) if (*b, *c) == (band, column)) {
+                                    self.editing = None;
+                                }
                             } else if response.has_focus() {
+                                // Another cell was still being typed in: keep what was typed there
+                                // before this cell takes over the buffer.
+                                if let Some((b, c, pending)) = self.editing.take().filter(|(b, c, _)| (*b, *c) != (band, column)) {
+                                    state.set_band_field(b, FIELDS[c], &pending);
+                                }
                                 self.editing = Some((band, column, text));
                             }
                         }

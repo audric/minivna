@@ -51,8 +51,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
             for (name, shortcut, action) in [
                 ("Open...", "Ctrl+O", FileAction::Open),
                 ("Save...", "Ctrl+S", FileAction::Save),
-                ("Save as CSV (ZPlots)...", "", FileAction::SaveCsv),
-                ("Save graph as PNG...", "", FileAction::SavePng),
+                ("Save as CSV (ZPlots)...", "Ctrl+C", FileAction::SaveCsv),
+                ("Save graph as PNG...", "Ctrl+N", FileAction::SavePng),
             ] {
                 if item(ui, t(name), shortcut) {
                     actions.push(Action::File(action));
@@ -153,10 +153,22 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
     });
 }
 
-/// Keyboard shortcuts of the menus. Function keys work always; letters need Ctrl.
+/// Keyboard shortcuts of the menus: function keys alone, letters with Ctrl.
+/// None of them act while the cursor is in a text box, where Ctrl+A, Ctrl+C and the
+/// like belong to the text.
 pub fn shortcuts(ui: &egui::Ui, state: &AppState, actions: &mut Vec<Action>) {
+    if ui.ctx().text_edit_focused() {
+        return;
+    }
     let ctrl = egui::Modifiers::COMMAND;
     ui.input_mut(|input| {
+        // The toolkit turns Ctrl+C into a "copy" event instead of a key.
+        if input.events.iter().any(|event| matches!(event, egui::Event::Copy)) {
+            actions.push(Action::File(FileAction::SaveCsv));
+        }
+        if input.consume_key(ctrl, egui::Key::N) {
+            actions.push(Action::File(FileAction::SavePng));
+        }
         for (index, key) in F_KEYS.into_iter().enumerate() {
             if index + 10 < state.settings.bands.len() && index < 9 && input.consume_key(ctrl, key) {
                 actions.push(Action::Band(index + 10));
