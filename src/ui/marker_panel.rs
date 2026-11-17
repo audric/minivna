@@ -2,7 +2,7 @@
 
 use eframe::egui;
 
-use super::state::{parse_mhz, AppState, Entry, Marker, UiMode};
+use super::state::{parse_mhz, AppState, Big, Entry, Marker, UiMode};
 use super::text::t;
 use super::{color32, Action};
 
@@ -47,7 +47,7 @@ fn rows(ui: &mut egui::Ui, state: &mut AppState) {
             None => "---",
         };
         let loss_header = if state.mode == UiMode::Transmission { "T.L." } else { "R.L." };
-        for header in ["", "", "", "Frequency", "SWR", "| Z |", loss_header, "Phase", "Rs", xs_header, last_header] {
+        for header in ["", "", "", "Frequency", "SWR", "| Z |", loss_header, "Phase", "Rs", xs_header, last_header, "Visual."] {
             ui.label(t_dynamic(header));
         }
         ui.end_row();
@@ -79,6 +79,7 @@ fn rows(ui: &mut egui::Ui, state: &mut AppState) {
             }
             let extra = reactance.as_ref().map(|(_, a, b)| if marker == Marker::M1 { a.as_str() } else { b.as_str() });
             value(ui, extra.unwrap_or(""));
+            big_box(ui, state, if marker == Marker::M1 { Big::M1 } else { Big::M2 });
             ui.end_row();
         }
 
@@ -89,8 +90,18 @@ fn rows(ui: &mut egui::Ui, state: &mut AppState) {
         for text in &row {
             value(ui, text);
         }
+        ui.label("");
+        big_box(ui, state, Big::SwrMin);
         ui.end_row();
     });
+}
+
+/// "Visual": show this row large on the graph. Only one row at a time.
+fn big_box(ui: &mut egui::Ui, state: &mut AppState, row: Big) {
+    let mut on = state.big == Some(row);
+    if ui.checkbox(&mut on, "").changed() {
+        state.big = on.then_some(row);
+    }
 }
 
 fn between_markers(ui: &mut egui::Ui, state: &AppState) {

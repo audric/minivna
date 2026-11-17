@@ -10,7 +10,9 @@ use crate::calc::tools::{
 use crate::calc::Point;
 use crate::device::{Mode, SweepRequest, F_MAX_HZ, F_MIN_HZ};
 use crate::store::Settings;
-use crate::sweep::{Event, SweepResult};
+use crate::calc::tools::{lc_resonance, max_rl_index, min_rl_index};
+use crate::store::sweep_file::{SweepFile, ViewState};
+use crate::sweep::{build_result, Event, SweepResult};
 
 /// What the user is doing. Decides which panels are shown and how the device sweeps.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -103,6 +105,10 @@ pub struct AppState {
     pub current_band: Option<usize>,
     /// A value being typed in the small entry window, and the text so far.
     pub entry: Option<(Entry, String)>,
+    /// Size of the graph on screen in pixels, for saving it as a picture.
+    pub graph_size: [u32; 2],
+    /// The row shown as a large banner on the graph (the original's "Visual" boxes).
+    pub big: Option<Big>,
     /// Put the markers on the band's default positions when the next sweep arrives.
     band_markers_pending: bool,
     first_result_seen: bool,
@@ -141,6 +147,8 @@ impl AppState {
             zoom_stack: Vec::new(),
             current_band: None,
             entry: None,
+            big: None,
+            graph_size: [0, 0],
             band_markers_pending: false,
             first_result_seen: false,
             auto_pass: 0,
@@ -263,6 +271,14 @@ impl AppState {
     }
 }
 
+/// Which read-out row is shown large on the graph.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Big {
+    M1,
+    M2,
+    SwrMin,
+}
+
 /// What the small entry window is asking for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Entry {
@@ -292,7 +308,7 @@ pub fn field(value: f64) -> String {
 }
 
 impl AppState {
-    fn points(&self) -> &[Point] {
+    pub fn points(&self) -> &[Point] {
         self.result.as_ref().map_or(&[], |r| &r.points)
     }
 
@@ -412,6 +428,18 @@ impl AppState {
         let (a, b) = (points.get(self.m1?)?, points.get(self.m2?)?);
         let (bw, q) = bandwidth_q(a.freq_hz, b.freq_hz)?;
         Some((format!("{bw:.0}"), field(q)))
+    }
+
+    /// The large banner: which row it belongs to and its text, "frequency -> SWR".
+    pub fn big_text(&self) -> Option<(Big, String)> {
+        let big = self.big?;
+        let index = match big {
+            Big::M1 => self.m1,
+            Big::M2 => self.m2,
+            Big::SwrMin => self.swr_min(),
+        }?;
+        let p = self.points().get(index)?;
+        Some((big, format!("{:.6} -> {}", p.freq_hz / 1e6, field(p.swr))))
     }
 
     /// The point with the lowest SWR.
@@ -572,6 +600,107 @@ impl AppState {
             Mode::Transmission => self.calibration.transmission = Some(table),
         }
         self.calibration.save(path)
+    }
+}
+
+/// Where the LC calculator's buttons can send marker 1.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum M1Target {
+    MinSwr,
+    MaxRl,
+    MinRl,
+}
+
+impl AppState {
+    /// What "Save" writes: the last sweep and how it is being looked at.
+    pub fn to_sweep_file(&self) -> Option<SweepFile> {
+        let result = self.result.as_ref()?;
+        Some(SweepFile {
+            request: result.request,
+            raw: result.raw.clone(),
+            cal: result.cal.clone(),
+            view: ViewState {
+                m1: self.m1,
+                m2: self.m2,
+                show: self.show,
+                scale_60db: self.scale_60db,
+                rl_offset_db: self.rl_offset_db,
+            },
+        })
+    }
+
+    /// Show a saved sweep: range, mode, markers and view come from the file and the
+    /// values are recomputed from its raw readings.
+    pub fn load_sweep_file(&mut self, file: SweepFile) {
+        let SweepFile { request, raw, cal, view } = file;
+        self.extender = request.extender;
+        self.mode = match request.mode {
+            Mode::Transmission => UiMode::Transmission,
+            Mode::Reflection if self.mode == UiMode::Transmission || self.mode == UiMode::Generator => UiMode::Antenna,
+            Mode::Reflection => self.mode,
+        };
+        (self.start_hz, self.stop_hz, self.samples) = (request.start_hz, request.stop_hz, request.samples);
+        self.refresh_texts();
+        self.zoom_stack.clear();
+        self.current_band = None;
+        self.band_markers_pending = false;
+        self.auto_pass = 0;
+        self.result = Some(build_result(request, raw, cal, self.settings.signed_phase));
+        self.first_result_seen = true;
+        (self.m1, self.m2) = (view.m1, view.m2);
+        self.show = view.show;
+        self.scale_60db = view.scale_60db;
+        self.rl_offset_db = view.rl_offset_db.clamp(-60.0, 60.0);
+        self.status.clear();
+    }
+
+    /// The LC calculator: the capacitance in pF that resonates with `value` µH at marker 1's
+    /// frequency, or the inductance in µH for `value` pF. The formula is the same both ways.
+    pub fn lc_result(&self, value: f64) -> Option<f64> {
+        let point = self.points().get(self.m1?)?;
+        (value > 0.0 && value.is_finite()).then(|| lc_resonance(point.freq_hz / 1e6, value))
+    }
+
+    pub fn move_m1_to(&mut self, target: M1Target) {
+        let found = match target {
+            M1Target::MinSwr => swr_min_index(self.points()),
+            M1Target::MaxRl => max_rl_index(self.points()),
+            M1Target::MinRl => min_rl_index(self.points()),
+        };
+        if found.is_some() {
+            self.m1 = found;
+        }
+    }
+}
+
+/// A numeric column of the band table.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BandField {
+    Start,
+    Stop,
+    M1,
+    M2,
+}
+
+impl AppState {
+    /// Change one number of a band from typed text. False (and nothing changed) if the
+    /// text is not a frequency or would leave the band without a valid range.
+    pub fn set_band_field(&mut self, index: usize, field: BandField, text: &str) -> bool {
+        let (Some(band), Some(mhz)) = (self.settings.bands.get_mut(index), parse_mhz(text)) else { return false };
+        let highest = F_MAX_HZ as f64 / 1e6 * 16.0;
+        let (mut start, mut stop) = (band.start_mhz, band.stop_mhz);
+        match field {
+            BandField::Start => start = mhz,
+            BandField::Stop => stop = mhz,
+            BandField::M1 => band.m1_mhz = mhz,
+            BandField::M2 => band.m2_mhz = mhz,
+        }
+        if start < F_MIN_HZ as f64 / 1e6 || stop > highest || start >= stop {
+            return false;
+        }
+        (band.start_mhz, band.stop_mhz) = (start, stop);
+        band.needs_extender = stop > F_MAX_HZ as f64 / 1e6;
+        true
     }
 }
 
@@ -1024,5 +1153,103 @@ pub(crate) mod tests {
         assert_eq!(Calibration::load(&path).unwrap(), s.calibration);
         assert!(s.store_cal_table(Mode::Reflection, vec![1; 7], &path).is_err());
         assert_eq!(s.calibration.reflection.as_deref(), Some(&[-20i16; 1000][..]));
+    }
+
+    // ---- files, LC calculator (Task 13) ----
+
+    #[test]
+    fn sweep_file_round_trip_through_state() {
+        let mut s = swept();
+        (s.m1, s.m2) = (Some(12), Some(200));
+        s.show = [true, true, false, false, true, false];
+        s.scale_60db = true;
+        s.rl_offset_db = -3.0;
+        let file = s.to_sweep_file().unwrap();
+
+        let mut fresh = state();
+        fresh.load_sweep_file(file);
+        assert_eq!((fresh.start_hz, fresh.stop_hz, fresh.samples), (1_000_000, 30_000_000, 290));
+        assert_eq!((fresh.start_text.as_str(), fresh.samples_text.as_str()), ("1", "290"));
+        assert_eq!((fresh.m1, fresh.m2), (Some(12), Some(200)));
+        assert_eq!(fresh.show, s.show);
+        assert!(fresh.scale_60db);
+        assert_eq!(fresh.rl_offset_db, -3.0);
+        let (a, b) = (&s.result.as_ref().unwrap().points, &fresh.result.as_ref().unwrap().points);
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().zip(b).all(|(x, y)| x.rl_db == y.rl_db && x.freq_hz == y.freq_hz && x.swr == y.swr));
+    }
+
+    #[test]
+    fn loading_a_transmission_file_switches_mode() {
+        let mut s = swept();
+        s.result.as_mut().unwrap().request.mode = Mode::Transmission;
+        let file = s.to_sweep_file().unwrap();
+        let mut fresh = state();
+        fresh.load_sweep_file(file);
+        assert_eq!(fresh.mode, UiMode::Transmission);
+    }
+
+    #[test]
+    fn no_result_no_file() {
+        assert!(state().to_sweep_file().is_none());
+    }
+
+    #[test]
+    fn lc_uses_m1() {
+        let mut s = swept();
+        assert_eq!(s.lc_result(15.0), None);
+        s.place_marker(Marker::M1, 7.1e6);
+        assert!((s.lc_result(15.0).unwrap() - 33.497693).abs() < 1e-3);
+        assert_eq!(s.lc_result(0.0), None);
+        assert_eq!(s.lc_result(-1.0), None);
+    }
+
+    #[test]
+    fn move_m1() {
+        let mut s = swept();
+        {
+            let points = &mut s.result.as_mut().unwrap().points;
+            points[40].swr = 1.1;
+            points[60].rl_db = 55.0;
+            points[80].rl_db = 0.5;
+        }
+        s.move_m1_to(M1Target::MinSwr);
+        assert_eq!(s.m1, Some(40));
+        s.move_m1_to(M1Target::MaxRl);
+        assert_eq!(s.m1, Some(60));
+        s.move_m1_to(M1Target::MinRl);
+        assert_eq!(s.m1, Some(80));
+        let mut empty = state();
+        empty.move_m1_to(M1Target::MinSwr);
+        assert_eq!(empty.m1, None);
+    }
+
+    #[test]
+    fn big_banner_text() {
+        let mut s = swept();
+        assert_eq!(s.big_text(), None);
+        s.big = Some(Big::M1);
+        assert_eq!(s.big_text(), None); // marker 1 is off
+        s.m1 = Some(131);
+        s.result.as_mut().unwrap().points[131].swr = 1.5;
+        assert_eq!(s.big_text(), Some((Big::M1, "14.100000 -> 1.50".to_string())));
+    }
+
+    #[test]
+    fn band_cells_take_good_numbers_only() {
+        let mut s = state();
+        assert!(s.set_band_field(5, BandField::Start, "13,5"));
+        assert_eq!(s.settings.bands[5].start_mhz, 13.5);
+        assert!(!s.set_band_field(5, BandField::Start, "abc"));
+        assert!(!s.set_band_field(5, BandField::Start, "20")); // not below the end
+        assert!(!s.set_band_field(5, BandField::Stop, "5000")); // beyond any extender
+        assert!(!s.set_band_field(99, BandField::Stop, "15"));
+        assert_eq!((s.settings.bands[5].start_mhz, s.settings.bands[5].stop_mhz), (13.5, 14.5));
+        assert!(s.set_band_field(5, BandField::M1, "14.1"));
+        assert_eq!(s.settings.bands[5].m1_mhz, 14.1);
+        assert!(s.set_band_field(5, BandField::Stop, "200"));
+        assert!(s.settings.bands[5].needs_extender);
+        assert!(s.set_band_field(5, BandField::Stop, "14.5"));
+        assert!(!s.settings.bands[5].needs_extender);
     }
 }

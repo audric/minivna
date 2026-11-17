@@ -5,7 +5,7 @@ use eframe::egui;
 use super::state::{AppState, UiMode};
 use crate::device::Mode;
 use super::text::t;
-use super::{Action, Dialog};
+use super::{Action, Dialog, FileAction};
 
 const MODES: [(UiMode, egui::Key); 5] = [
     (UiMode::Antenna, egui::Key::A),
@@ -48,6 +48,17 @@ fn item(ui: &mut egui::Ui, text: &str, shortcut: &str) -> bool {
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button(t("File"), |ui| {
+            for (name, shortcut, action) in [
+                ("Open...", "Ctrl+O", FileAction::Open),
+                ("Save...", "Ctrl+S", FileAction::Save),
+                ("Save as CSV (ZPlots)...", "", FileAction::SaveCsv),
+                ("Save graph as PNG...", "", FileAction::SavePng),
+            ] {
+                if item(ui, t(name), shortcut) {
+                    actions.push(Action::File(action));
+                }
+            }
+            ui.separator();
             if item(ui, t("Exit"), "Ctrl+Q") {
                 actions.push(Action::Quit);
             }
@@ -119,6 +130,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
                 }
             }
             ui.separator();
+            for (name, dialog) in [(t("Bands predefined"), Dialog::Bands), (t("Colors"), Dialog::Colors), (t("Usual Velocity Factors"), Dialog::Velocity)] {
+                if item(ui, name, "") {
+                    actions.push(Action::Open(dialog));
+                }
+            }
+            ui.separator();
             ui.checkbox(&mut state.settings.step_bug, t("Compensate for firmware Step bug"));
             if ui.checkbox(&mut state.settings.extender_menu, t("Enable menu of Frequency Extender")).changed()
                 && !state.settings.extender_menu
@@ -127,6 +144,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut Vec<Action>) 
             }
         });
 
+        if ui.button(t("LC calculator")).clicked() {
+            actions.push(Action::Open(Dialog::Lc));
+        }
         if ui.button(t("About")).clicked() {
             actions.push(Action::Open(Dialog::About));
         }
@@ -154,6 +174,12 @@ pub fn shortcuts(ui: &egui::Ui, state: &AppState, actions: &mut Vec<Action>) {
         }
         if input.consume_key(ctrl, egui::Key::F) {
             actions.push(Action::FullRange);
+        }
+        if input.consume_key(ctrl, egui::Key::O) {
+            actions.push(Action::File(FileAction::Open));
+        }
+        if input.consume_key(ctrl, egui::Key::S) {
+            actions.push(Action::File(FileAction::Save));
         }
         if input.consume_key(ctrl, egui::Key::Q) {
             actions.push(Action::Quit);

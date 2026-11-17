@@ -1,7 +1,7 @@
 //! The graph as a list of simple shapes, with no dependency on the window toolkit.
 //! The screen and the PNG export both draw from this list.
 
-use super::state::{AppState, Curve};
+use super::state::{AppState, Big, Curve};
 use crate::calc::Point;
 use crate::store::{Colors, Rgb};
 
@@ -21,6 +21,8 @@ pub enum Prim {
     Fill { rect: [f32; 4], color: Rgb },
     Line { points: Vec<[f32; 2]>, color: Rgb, width: f32, dashed: bool },
     Text { pos: [f32; 2], text: String, color: Rgb, anchor: Anchor },
+    /// A filled box with large centred text.
+    Banner { rect: [f32; 4], fill: Rgb, text: String, color: Rgb },
 }
 
 /// The plotting rectangle inside a picture of a given size.
@@ -223,6 +225,17 @@ pub fn build(state: &AppState, colors: &Colors, width: f32, height_px: f32) -> V
         }
     }
 
+    if let Some((big, text)) = state.big_text() {
+        let fill = match big {
+            Big::M1 => Rgb(0, 255, 255),
+            Big::M2 => Rgb(192, 192, 192),
+            Big::SwrMin => colors.swr_min,
+        };
+        let width = (frame.right - frame.left).min(360.0);
+        let rect = [(frame.left + frame.right - width) / 2.0, frame.top + 8.0, width, 40.0];
+        out.push(Prim::Banner { rect, fill, text, color: colors.frame });
+    }
+
     if let Some(memo) = state.memo_y {
         out.push(Prim::Line { points: across(frame.y_of(memo)), color: colors.frame, width: 1.0, dashed: true });
     }
@@ -335,6 +348,17 @@ mod tests {
         assert_eq!(count(&s), 6);
         s.show = [false; 6];
         assert_eq!(count(&s), 0);
+    }
+
+    #[test]
+    fn the_big_banner_is_drawn_when_chosen() {
+        let mut s = state();
+        s.result = Some(fake_result(1_000_000, 30_000_000, 290));
+        let banners = |s: &AppState| build(s, &s.settings.screen, 800.0, 500.0).iter().filter(|p| matches!(p, Prim::Banner { .. })).count();
+        assert_eq!(banners(&s), 0);
+        s.m2 = Some(10);
+        s.big = Some(Big::M2);
+        assert_eq!(banners(&s), 1);
     }
 
     #[test]

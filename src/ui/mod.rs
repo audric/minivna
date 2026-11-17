@@ -8,6 +8,7 @@ use crate::store::{self, Rgb, Settings};
 use crate::sweep::{self, Command, PortChoice, Worker};
 
 pub mod dialogs;
+pub mod files;
 pub mod graph;
 pub mod marker_panel;
 pub mod menu;
@@ -40,7 +41,16 @@ pub enum Action {
     /// Pass a command straight to the sweep worker.
     Send(Command),
     SetPort(PortChoice),
+    File(FileAction),
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileAction {
+    Open,
+    Save,
+    SaveCsv,
+    SavePng,
 }
 
 /// The windows that can be opened from the menus.
@@ -48,6 +58,9 @@ pub enum Action {
 pub enum Dialog {
     About,
     Velocity,
+    Bands,
+    Colors,
+    Lc,
     Port,
     Calibrate(Mode),
     Dds,
@@ -55,6 +68,10 @@ pub enum Dialog {
 
 pub fn color32(c: Rgb) -> egui::Color32 {
     egui::Color32::from_rgb(c.0, c.1, c.2)
+}
+
+fn saved(path: std::path::PathBuf) -> String {
+    format!("{} {}", text::t("Saved"), path.display())
 }
 
 /// Add advice to an error where there is something the user can do about it.
@@ -163,7 +180,11 @@ impl App {
                 }
             }
             Action::Open(Dialog::About) => self.about_open = true,
-            Action::Open(Dialog::Velocity) => {}
+            Action::Open(Dialog::Velocity) => self.dialogs.velocity.open = true,
+            Action::Open(Dialog::Bands) => self.dialogs.bands.open = true,
+            Action::Open(Dialog::Colors) => self.dialogs.colors.open = true,
+            Action::Open(Dialog::Lc) => self.dialogs.lc.open = true,
+            Action::File(action) => self.file(action),
             Action::Open(Dialog::Port) => self.dialogs.port.open(),
             Action::Open(Dialog::Calibrate(mode)) => self.dialogs.calibrate.open(mode),
             Action::Open(Dialog::Dds) => {
@@ -188,6 +209,33 @@ impl App {
 }
 
 impl App {
+    /// Ask for a file name and do what the File menu item says. Problems go to the status bar.
+    fn file(&mut self, action: FileAction) {
+        let dialog = rfd::FileDialog::new();
+        let [width, height] = self.state.graph_size;
+        let outcome = match action {
+            FileAction::Open => {
+                if self.state.busy || self.state.continuous {
+                    Some(Err(text::t("Stop the sweep before opening a file.").to_string()))
+                } else {
+                    dialog.add_filter("miniVNA sweep", &["mvna"]).pick_file().map(|path| {
+                        files::open_sweep(&mut self.state, &path).map(|()| format!("{} {}", text::t("Opened"), path.display()))
+                    })
+                }
+            }
+            FileAction::Save if self.state.result.is_none() => Some(Err(text::t("Nothing to save: make a sweep first.").to_string())),
+            FileAction::SaveCsv if self.state.result.is_none() => Some(Err(text::t("Nothing to save: make a sweep first.").to_string())),
+            FileAction::Save => dialog.add_filter("miniVNA sweep", &["mvna"]).set_file_name("sweep.mvna").save_file().map(|p| files::save_sweep(&self.state, &p).map(saved)),
+            FileAction::SaveCsv => dialog.add_filter("CSV", &["csv"]).set_file_name("sweep.csv").save_file().map(|p| files::save_csv(&self.state, &p).map(saved)),
+            FileAction::SavePng => dialog.add_filter("PNG", &["png"]).set_file_name("sweep.png").save_file().map(|p| files::save_png(&self.state, &p, width, height).map(saved)),
+        };
+        match outcome {
+            Some(Ok(message)) => self.state.status = message,
+            Some(Err(why)) => self.state.status = format!("!!! {why}"),
+            None => {}
+        }
+    }
+
     /// The title bar names the mode and the port, as the original does.
     fn update_title(&mut self, ctx: &egui::Context) {
         let title = format!("minivna - Mode : {} ( {} )", self.state.mode.name(), self.port_name());
@@ -279,6 +327,10 @@ impl eframe::App for App {
         self.dialogs.calibrate.show(ui.ctx(), &self.state, &mut actions);
         self.dialogs.dds.show(ui.ctx(), &mut self.state, &mut actions);
         self.dialogs.generator.show(ui.ctx(), &self.state, &mut actions);
+        self.dialogs.bands.show(ui.ctx(), &mut self.state);
+        self.dialogs.colors.show(ui.ctx(), &mut self.state);
+        self.dialogs.velocity.show(ui.ctx(), &mut self.state);
+        self.dialogs.lc.show(ui.ctx(), &mut self.state);
         menu::shortcuts(ui, &self.state, &mut actions);
         self.keys(ui, &mut actions);
 
