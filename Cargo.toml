@@ -1,0 +1,15 @@
+[package]
+name = "minivna"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop program for the mRS miniVNA antenna analyser"
+
+[lib]
+name = "minivna"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minivna"
+path = "src/main.rs"
+
+[dependencies]
